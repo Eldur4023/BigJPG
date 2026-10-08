@@ -1,0 +1,9 @@
+# Real-ESRGAN 0.3.0 (upstream, BSD-3) y sus pesos: se descargan aparte, ver README.md
+Real-ESRGAN-0.3.0/
+*.pth
+*.pt
+.venv/
+data/
+__pycache__/
+*.pyc
+*.log

@@ -1,0 +1,307 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>BigJPG local · Ampliar imágenes con Real-ESRGAN</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🔍</text></svg>">
+</head>
+<body>
+  <header class="topbar">
+    <div class="wrap topbar-inner">
+      <div class="brand">
+        <span class="brand-mark">↗</span>
+        <div>
+          <h1>BigJPG <span>local</span></h1>
+          <p>Ampliación de imágenes con IA · Real-ESRGAN</p>
+        </div>
+      </div>
+      <div class="device-badge {{ 'gpu' if device.device == 'cuda' else 'cpu' }}">
+        <span class="dot"></span>
+        {{ device.name }}
+        {% if device.device == 'cpu' %}<em>· sin GPU, será lento</em>{% endif %}
+      </div>
+    </div>
+  </header>
+
+  <main class="wrap">
+    <nav class="tabs" role="tablist">
+      <button type="button" class="tab active" id="tabBtnUpscale" data-tab="upscale" role="tab" aria-selected="true">
+        ↗ Ampliar imagen
+      </button>
+      <button type="button" class="tab" id="tabBtnInpaint" data-tab="inpaint" role="tab" aria-selected="false">
+        🩹 Restaurar / quitar marcas de agua
+      </button>
+      <button type="button" class="tab" id="tabBtnDegrade" data-tab="degrade" role="tab" aria-selected="false">
+        ▦ Pixelar
+      </button>
+    </nav>
+
+    <div class="tabpanel" id="tabUpscale" role="tabpanel">
+    <section class="panel options">
+      <h2>1 · Configuración</h2>
+
+      <div class="field">
+        <label>Tipo de imagen</label>
+        <div class="cards" id="imageType">
+          <label class="card">
+            <input type="radio" name="image_type" value="ilustracion" checked>
+            <span class="card-body">
+              <strong>Dibujos / Anime / Arte ✦</strong>
+              <small>Recomendado · líneas limpias y color plano</small>
+            </span>
+          </label>
+          <label class="card">
+            <input type="radio" name="image_type" value="anime_video">
+            <span class="card-body">
+              <strong>Anime rápido</strong>
+              <small>Modelo ligero, 4× más veloz, menos detalle</small>
+            </span>
+          </label>
+          <label class="card">
+            <input type="radio" name="image_type" value="foto">
+            <span class="card-body">
+              <strong>Fotografías</strong>
+              <small>Fotos y escenas reales</small>
+            </span>
+          </label>
+        </div>
+      </div>
+
+      <div class="field">
+        <label>Ampliación</label>
+        <div class="segmented" id="scale">
+          {% for s in scales %}
+          <label>
+            <input type="radio" name="scale" value="{{ s }}" {% if s == 4 %}checked{% endif %}>
+            <span>{{ s }}×</span>
+          </label>
+          {% endfor %}
+        </div>
+        <p class="hint" id="scaleHint">×8 y ×16 encadenan varias pasadas del modelo: tardan bastante más.</p>
+      </div>
+
+      <div class="field">
+        <label>Reducción de ruido</label>
+        <div class="segmented" id="denoise">
+          {% for d in denoise_levels %}
+          <label>
+            <input type="radio" name="denoise" value="{{ d }}" {% if d == 'ninguna' %}checked{% endif %}>
+            <span>{{ d|capitalize }}</span>
+          </label>
+          {% endfor %}
+        </div>
+        <p class="hint" id="denoiseHint"></p>
+      </div>
+
+      <details class="advanced">
+        <summary>Opciones avanzadas</summary>
+        <div class="adv-grid">
+          <div class="field">
+            <label for="model">Modelo</label>
+            <select id="model" name="model">
+              <option value="auto" selected>Automático (según tipo y ruido)</option>
+              {% for key, label in models.items() %}
+              <option value="{{ key }}">{{ label }}</option>
+              {% endfor %}
+            </select>
+          </div>
+          <div class="field">
+            <label for="format">Formato de salida</label>
+            <select id="format" name="format">
+              <option value="png" selected>PNG (sin pérdida)</option>
+              <option value="jpg">JPG</option>
+              <option value="webp">WebP</option>
+            </select>
+          </div>
+          <div class="field" id="qualityField" hidden>
+            <label for="quality">Calidad <span id="qualityValue">95</span></label>
+            <input type="range" id="quality" name="quality" min="50" max="100" value="95">
+          </div>
+          <div class="field">
+            <label for="tile">Tamaño de tile</label>
+            <select id="tile" name="tile">
+              <option value="auto" selected>Automático</option>
+              <option value="0">Sin trocear (más rápido, más RAM)</option>
+              <option value="512">512</option>
+              <option value="256">256</option>
+              <option value="128">128 (mínima RAM)</option>
+            </select>
+          </div>
+        </div>
+      </details>
+    </section>
+
+    <section class="panel">
+      <h2>2 · Sube tus imágenes</h2>
+      <div class="dropzone" id="dropzone" tabindex="0">
+        <input type="file" id="fileInput" accept="image/png,image/jpeg,image/webp,image/bmp,image/tiff" multiple hidden>
+        <div class="dz-icon">🖼️</div>
+        <p><strong>Arrastra imágenes aquí</strong> o haz clic para elegirlas</p>
+        <small>PNG, JPG, WebP, BMP, TIFF · hasta {{ max_upload_mb }} MB por archivo</small>
+      </div>
+      <p class="hint">Los archivos se procesan en tu ordenador y se borran automáticamente pasadas unas horas.</p>
+    </section>
+    </div>
+
+    <div class="tabpanel" id="tabInpaint" role="tabpanel" hidden>
+      <section class="panel" id="inpaintPickPanel">
+        <h2>1 · Elige una imagen</h2>
+        <div class="dropzone" id="inpaintDropzone" tabindex="0">
+          <input type="file" id="inpaintFileInput" accept="image/png,image/jpeg,image/webp,image/bmp,image/tiff" hidden>
+          <div class="dz-icon">🩹</div>
+          <p><strong>Arrastra una imagen aquí</strong> o haz clic para elegirla</p>
+          <small>Se abrirá un editor para marcar la zona a eliminar</small>
+        </div>
+        <p class="hint">Reconstruye la zona que marques (marcas de agua, objetos, desperfectos). Úsalo solo con
+          imágenes tuyas o sobre las que tengas derecho a modificar: la herramienta rellena el hueco, no comprueba
+          la procedencia del contenido.</p>
+      </section>
+
+      <section class="panel" id="editorPanel" hidden>
+        <h2>2 · Marca la zona a eliminar</h2>
+
+        <div class="editor-toolbar">
+          <div class="segmented" id="editorTool">
+            <label>
+              <input type="radio" name="edit_tool" value="brush" checked>
+              <span>🖌️ Pincel</span>
+            </label>
+            <label>
+              <input type="radio" name="edit_tool" value="rect">
+              <span>▭ Rectángulo</span>
+            </label>
+          </div>
+          <label class="tool-range">
+            Grosor del pincel
+            <input type="range" id="brushSize" min="8" max="150" value="35">
+          </label>
+          <button type="button" class="btn ghost" id="undoBtn">Deshacer</button>
+          <button type="button" class="btn ghost" id="clearBtn">Borrar marcas</button>
+        </div>
+
+        <div class="editor-canvas-wrap" id="editorWrap">
+          <img id="editorImage" alt="Imagen a restaurar">
+          <canvas id="editorCanvas"></canvas>
+        </div>
+        <p class="hint">Pinta por encima de lo que quieras eliminar. El área marcada en rosa se reconstruirá a
+          partir de lo que la rodea.</p>
+
+        <div class="field">
+          <label>Grosor extra de máscara <span id="maskGrowValue">{{ mask_grow.default }}</span> px</label>
+          <input type="range" id="maskGrow" min="{{ mask_grow.min }}" max="{{ mask_grow.max }}"
+                 value="{{ mask_grow.default }}">
+          <p class="hint">Amplía el área marcada unos píxeles para cubrir el halo con antialiasing que suele
+            quedar pegado al borde de una marca de agua.</p>
+        </div>
+
+        <details class="advanced">
+          <summary>Opciones avanzadas</summary>
+          <div class="adv-grid">
+            <div class="field">
+              <label for="inpaintFormat">Formato de salida</label>
+              <select id="inpaintFormat">
+                <option value="png" selected>PNG (sin pérdida)</option>
+                <option value="jpg">JPG</option>
+                <option value="webp">WebP</option>
+              </select>
+            </div>
+            <div class="field" id="inpaintQualityField" hidden>
+              <label for="inpaintQuality">Calidad <span id="inpaintQualityValue">95</span></label>
+              <input type="range" id="inpaintQuality" min="50" max="100" value="95">
+            </div>
+          </div>
+        </details>
+
+        <div class="editor-actions">
+          <button type="button" class="btn ghost" id="editorCancel">Elegir otra imagen</button>
+          <button type="button" class="btn" id="editorApply" disabled>Marca una zona para aplicar</button>
+        </div>
+      </section>
+    </div>
+
+    <div class="tabpanel" id="tabDegrade" role="tabpanel" hidden>
+      <section class="panel options">
+        <h2>1 · Configuración</h2>
+        <div class="field">
+          <label>Reducción de resolución</label>
+          <div class="segmented" id="factor">
+            <label><input type="radio" name="factor" value="2" checked><span>÷2</span></label>
+            <label><input type="radio" name="factor" value="4"><span>÷4</span></label>
+            <label><input type="radio" name="factor" value="8"><span>÷8</span></label>
+          </div>
+          <p class="hint">La imagen se reduce y se reescala al tamaño original: mismas dimensiones, menos calidad, píxeles más grandes.</p>
+        </div>
+        <div class="field">
+          <label for="degradeFormat">Formato de salida</label>
+          <select id="degradeFormat">
+            <option value="png" selected>PNG (sin pérdida)</option>
+            <option value="jpg">JPG</option>
+            <option value="webp">WebP</option>
+          </select>
+        </div>
+      </section>
+      <section class="panel">
+        <h2>2 · Sube tus imágenes</h2>
+        <div class="dropzone" id="degradeDropzone" tabindex="0">
+          <input type="file" id="degradeFileInput" accept="image/png,image/jpeg,image/webp,image/bmp,image/tiff" multiple hidden>
+          <div class="dz-icon">▦</div>
+          <p><strong>Arrastra imágenes aquí</strong> o haz clic para elegirlas</p>
+        </div>
+      </section>
+    </div>
+
+    <section class="panel" id="jobsPanel" hidden>
+      <h2>Resultados <span class="queue-info" id="queueInfo"></span></h2>
+      <div class="jobs" id="jobs"></div>
+    </section>
+  </main>
+
+  <footer class="wrap footer">
+    <p>Motor: <a href="https://github.com/xinntao/Real-ESRGAN" target="_blank" rel="noreferrer">Real-ESRGAN 0.3.0</a>
+       (Xintao Wang et al., BSD-3) ejecutándose en local.</p>
+  </footer>
+
+  <!-- Comparador antes / después -->
+  <div class="modal" id="modal" hidden>
+    <div class="modal-box">
+      <button class="modal-close" id="modalClose" aria-label="Cerrar">×</button>
+      <h3 id="modalTitle">Comparar</h3>
+      <div class="compare" id="compare">
+        <img id="cmpAfter" alt="Resultado">
+        <div class="cmp-before" id="cmpBeforeWrap"><img id="cmpBefore" alt="Original"></div>
+        <div class="cmp-handle" id="cmpHandle"><span></span></div>
+        <div class="cmp-tag left">Original</div>
+        <div class="cmp-tag right" id="cmpAfterTag">Resultado</div>
+      </div>
+      <p class="hint" id="modalInfo"></p>
+    </div>
+  </div>
+
+  <template id="jobTemplate">
+    <article class="job">
+      <div class="job-thumb"><img alt=""></div>
+      <div class="job-main">
+        <div class="job-head">
+          <span class="job-kind"></span>
+          <strong class="job-name"></strong>
+          <span class="job-badge"></span>
+        </div>
+        <div class="job-meta"></div>
+        <div class="bar"><div class="bar-fill"></div></div>
+        <div class="job-foot">
+          <span class="job-msg"></span>
+          <div class="job-actions">
+            <button class="btn ghost act-cancel" type="button">Cancelar</button>
+            <button class="btn ghost act-compare" type="button" hidden>Comparar</button>
+            <a class="btn act-download" hidden download>Descargar</a>
+          </div>
+        </div>
+      </div>
+    </article>
+  </template>
+
+  <script src="{{ url_for('static', filename='js/app.js') }}"></script>
+</body>
+</html>

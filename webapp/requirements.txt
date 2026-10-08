@@ -1,0 +1,8 @@
+# La app NO necesita basicsr ni gfpgan: las arquitecturas de Real-ESRGAN
+# van incluidas en webapp/esrgan/archs.py.
+flask>=3.0
+numpy>=1.26
+opencv-python-headless>=4.9
+# En Windows el wheel por defecto de PyPI es CPU. Para GPU NVIDIA instala antes:
+#   pip install torch --index-url https://download.pytorch.org/whl/cu124
+torch>=2.2
