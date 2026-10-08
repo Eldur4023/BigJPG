@@ -36,5 +36,5 @@ app:
     static "/" -> "./public"
 
     sqlite:
-        file env("BIGJPG_DB", "./data/bigjpg.db")
+        file env("BIGJPG_DB", "./bigjpg.db")
         pool 2
