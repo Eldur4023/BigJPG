@@ -1,0 +1,181 @@
+# Extremo a extremo de la app de escritorio: un servidor de BigJPG real (con el motor de pega) y la propia app.
+# Las lanza desktop/tests/e2e.sh.
+
+import test
+
+fn string url(string path):
+    return test.base_url() + path
+
+fn string files():
+    return os.getenv("BIGJPG_TEST_FILES", ".")
+
+fn string server():
+    return os.getenv("BIGJPG_TEST_SERVER", "http://127.0.0.1:5992")
+
+fn Json get(string path):
+    return await http.get(url(path))
+
+fn Json post_json(string path, Json body):
+    return await http.post(url(path), body, { "X-Requested-With": "bigjpg" })
+
+fn Json delete(string path):
+    return await http.delete(url(path), { "X-Requested-With": "bigjpg" })
+
+fn Json upload(string path, string query, bool csrf):
+    List<string> args = ["-s", "-m", "30", "-w", "\n%{http_code}", "-F", "file=@" + path]
+    if csrf:
+        args.add("-H")
+        args.add("X-Requested-With: bigjpg")
+    args.add(url("/api/jobs" + query))
+    Json r = await os.run("curl", args, { "timeout_ms": 40000 })
+    string out = str(r["stdout"])
+    List<string> parts = out.split("\n")
+    string code = parts[len(parts) - 1]
+    Json parsed = null
+    try:
+        parsed = json.parse(out.slice(0, len(out) - len(code) - 1))
+    catch e:
+        parsed = { "raw": out }
+    return { "status": int(code), "body": parsed }
+
+# El motor de pega lee su modo de un fichero en el directorio de datos de quien lo lanza.
+fn bool set_mode(string where, string mode):
+    string dir = where == "server" ? os.getenv("BIGJPG_TEST_SERVER_DATA", ".") : os.getenv("BIGJPG_DATA_DIR", ".")
+    await os.write_file(os.path_join(dir, "fake-engine-mode"), mode)
+    return true
+
+fn bool use_server():
+    Json r = await post_json("/api/settings", { "server_url": server() })
+    return r["status"] == 200
+
+fn Json wait_done(string id):
+    int i = 0
+    while i < 160:
+        Json r = await get("/api/jobs/" + id)
+        string st = r["body"]["status"]
+        if st != "queued" and st != "running":
+            return r["body"]
+        await sleep(250)
+        i = i + 1
+    return (await get("/api/jobs/" + id))["body"]
+
+test "información: modo escritorio, motor local y servidor sin configurar":
+    Json r = await get("/api/info")
+    test.eq(r["status"], 200)
+    test.eq(r["body"]["mode"], "desktop")
+    test.eq(r["body"]["engines"]["local"]["ready"], true)
+    test.eq(r["body"]["engines"]["server"]["configured"], false)
+    test.eq((await http.get(url("/")))["status"], 200)
+
+test "ajustes del servidor: rechaza lo que no es un servidor de BigJPG":
+    test.eq((await post_json("/api/settings", { "server_url": "ftp://x" }))["status"], 400)
+    Json dead = await post_json("/api/settings", { "server_url": "http://127.0.0.1:9" })
+    test.eq(dead["status"], 400)
+    test.contains(str(dead["body"]["error"]), "no responde")
+    # algo que responde pero no es un servidor de BigJPG
+    Json self = await post_json("/api/settings", { "server_url": server() + "/healthz" })
+    test.eq(self["status"], 400)
+    test.contains(str(self["body"]["error"]), "no parece un servidor")
+    # sin la cabecera anti-CSRF
+    test.eq((await http.post(url("/api/settings"), { "server_url": server() }))["status"], 403)
+    # el bueno
+    Json ok = await post_json("/api/settings", { "server_url": server() + "/" })
+    test.eq(ok["status"], 200)
+    test.eq(ok["body"]["ok"], true)
+    Json info = await get("/api/info")
+    test.eq(info["body"]["engines"]["server"]["ready"], true)
+    test.eq(info["body"]["engines"]["server"]["url"], server())
+
+test "ampliar en este equipo":
+    await set_mode("local", "ok")
+    Json up = await upload(files() + "/small.png", "?model=anime&scale=4&fmt=png&target=local", true)
+    test.eq(up["status"], 201, str(up["body"]))
+    test.eq(up["body"]["target"], "local")
+    Json done = await wait_done(up["body"]["id"])
+    test.eq(done["status"], "done", str(done))
+    test.eq(done["out"]["w"], 32)
+    test.eq((await http.get(url("/api/jobs/" + up["body"]["id"] + "/result")))["status"], 200)
+    test.eq((await http.get(url("/api/jobs/" + up["body"]["id"] + "/thumb")))["status"], 200)
+
+test "ampliar en el servidor: se sube, se refleja y se trae el resultado":
+    await use_server()
+    await set_mode("server", "ok")
+    Json up = await upload(files() + "/small.png", "?model=foto&scale=4&fmt=png&target=server", true)
+    test.eq(up["status"], 201, str(up["body"]))
+    test.eq(up["body"]["target"], "server")
+    string id = up["body"]["id"]
+    Json row = await get_job(id)
+    test.ok(len(str(row["remote_id"])) > 5, "se guardó el id remoto")
+    Json done = await wait_done(id)
+    test.eq(done["status"], "done", str(done))
+    test.eq(done["out"]["w"], 32)
+    # el resultado está YA en este equipo (el servidor lo bajó a disco y puede olvidarlo)
+    Json res = await http.get(url("/api/jobs/" + id + "/result"))
+    test.eq(res["status"], 200)
+    test.ok(os.is_file(row["out_path"]), "el resultado está en disco local")
+    # y el servidor ya no guarda el trabajo (se borra tras traerlo)
+    Json remote = await http.get(server() + "/api/jobs/" + str(row["remote_id"]))
+    test.eq(remote["status"], 404)
+
+test "si el servidor falla, el error llega a la ventana":
+    await use_server()
+    await set_mode("server", "fail")
+    Json up = await upload(files() + "/small.png", "?model=anime&scale=4&target=server", true)
+    test.eq(up["status"], 201)
+    Json done = await wait_done(up["body"]["id"])
+    test.eq(done["status"], "error")
+    test.contains(str(done["error"]), "vkAllocateMemory")
+    await set_mode("server", "ok")
+
+test "el servidor no responde: no se acepta el trabajo":
+    await post_json("/api/settings", { "server_url": "http://127.0.0.1:9" })
+    # la comprobación de estado tarda hasta 15 s en caducar; se fuerza con una llamada a ajustes (ya hecha)
+    Json up = await upload(files() + "/small.png", "?model=anime&scale=4&target=server", true)
+    test.eq(up["status"], 503)
+    test.contains(str(up["body"]["detail"]), "servidor")
+    await use_server()
+
+test "cancelar un trabajo del servidor lo cancela allí":
+    await use_server()
+    await set_mode("server", "slow")
+    Json up = await upload(files() + "/small.png", "?model=anime&scale=4&target=server", true)
+    string id = up["body"]["id"]
+    Json row = await get_job(id)
+    string rid = str(row["remote_id"])
+    int i = 0
+    while i < 40:
+        Json s = await get("/api/jobs/" + id)
+        if s["body"]["status"] == "running":
+            break
+        await sleep(250)
+        i = i + 1
+    await set_mode("server", "ok")
+    test.eq((await delete("/api/jobs/" + id))["status"], 200)
+    test.eq((await get("/api/jobs/" + id))["status"], 404)
+    # el servidor lo marca cancelado (o ya lo ha limpiado)
+    await sleep(1500)
+    Json remote = await http.get(server() + "/api/jobs/" + rid)
+    test.ok(remote["status"] == 404 or remote["body"]["status"] == "canceled", "en el servidor: " + str(remote["body"]))
+
+test "entradas no válidas":
+    test.eq((await upload(files() + "/small.png", "?model=anime&scale=4", false))["status"], 403)
+    Json txt = await upload(files() + "/notimage.txt", "?model=anime&scale=4", true)
+    test.eq(txt["status"], 400)
+    test.eq((await upload(files() + "/small.png", "?model=anime&scale=2", true))["status"], 400)
+    test.eq((await upload(files() + "/small.png", "?model=anime&scale=4&target=otro", true))["status"], 400)
+    test.eq((await upload(files() + "/big.png", "?model=anime&scale=4", true))["status"], 413)
+    int rows = (await sqlite.query("select count(*) as n from jobs"))[0]["n"]
+    test.eq(len(os.list_dir(os.path_join(os.getenv("BIGJPG_DATA_DIR", "."), "jobs"))), rows, "ninguna carpeta huérfana")
+
+test "borrar un trabajo local quita sus ficheros":
+    await set_mode("local", "ok")
+    Json up = await upload(files() + "/small.png", "?model=anime&scale=4&target=local", true)
+    string id = up["body"]["id"]
+    await wait_done(id)
+    string dir = os.path_join(os.getenv("BIGJPG_DATA_DIR", "."), "jobs", id)
+    test.ok(os.is_dir(dir))
+    test.eq((await delete("/api/jobs/" + id))["status"], 200)
+    test.ok(not os.is_dir(dir))
+
+test "una ruta de la API que no existe es un 404":
+    test.eq((await get("/api/nada"))["status"], 404)

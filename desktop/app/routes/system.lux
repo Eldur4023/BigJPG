@@ -1,0 +1,102 @@
+# Lo que sólo puede hacer una app con ventana: guardar con el diálogo nativo, la bandeja y las actualizaciones
+# desde GitHub (como Mail, Drive Sync y Calendar). install.sh deja en /opt/bigjpg-desktop de qué repositorio y
+# commit se instaló; la app compara ese commit con el de GitHub y, si hay cambios, lanza desktop/deploy/update.sh
+# (pull, compilar y `pkexec install.sh`) en segundo plano.
+
+get endpoint("/healthz"):
+    return { "status": "ok" }
+
+# «Guardar como…»: el diálogo nativo elige dónde, y aquí se copia el resultado.
+post endpoint("/api/jobs/:id/save", string id):
+    need_csrf()
+    Json r = await get_job(id)
+    if r == null or r["status"] != "done" or not os.is_file(r["out_path"]):
+        abort(404, "El resultado no está disponible.")
+    string base = r["name"]
+    int dot = base.index_of(".")
+    string stem = dot > 0 ? base.slice(0, dot) : base
+    string dest = await window.save_file(stem + "_x" + str(r["scale"]) + "." + r["fmt"])
+    if dest == "":
+        return { "ok": false, "cancelled": true }
+    await os.copy_file(r["out_path"], dest, true)
+    return { "ok": true, "path": dest }
+
+# Icono en la bandeja del sistema (clic: muestra u oculta la ventana). Lo pide la página al cargar.
+post endpoint("/api/chrome"):
+    window.set_tray("./icon.png", "BigJPG")
+    return status(204)
+
+fn string opt_dir():
+    return os.getenv("BIGJPG_DESKTOP_OPT", "/opt/bigjpg-desktop")
+
+fn string update_log():
+    return os.path_join(os.getenv("HOME", "/tmp"), ".cache/bigjpg-update.log")
+
+fn string source_repo():
+    if not os.path_exists(opt_dir() + "/source"):
+        return ""
+    string repo = await os.read_file(opt_dir() + "/source")
+    return repo.trim()
+
+# git sin preguntar nunca credenciales por terminal (no hay terminal: se colgaría).
+fn Json git(string repo, List<string> args, int timeout):
+    List<string> argv = ["-C", repo]
+    for string arg in args:
+        argv.add(arg)
+    return await os.run("git", argv, { "timeout_ms": timeout, "env": { "GIT_TERMINAL_PROMPT": "0" } })
+
+get endpoint("/api/update"):
+    string repo = await source_repo()
+    if repo == "" or not os.is_dir(repo):
+        return { "available": false, "error": "instalación sin repositorio de origen (reinstala con desktop/deploy/install.sh)" }
+    string current = ""
+    if os.path_exists(opt_dir() + "/version"):
+        string v = await os.read_file(opt_dir() + "/version")
+        current = v.trim()
+    if current == "":
+        Json head = await git(repo, ["rev-parse", "HEAD"], 5000)
+        current = str(head["stdout"]).trim()
+    Json f = await git(repo, ["fetch", "-q"], 60000)
+    if f["status"] != 0:
+        return { "available": false, "error": "no se pudo consultar GitHub: " + str(f["stderr"]).trim() }
+    Json log = await git(repo, ["log", "--format=%h %s", current + "..@{u}"], 5000)
+    List<string> commits = []
+    for string line in str(log["stdout"]).split("\n"):
+        if line.trim() != "":
+            commits.add(line.trim())
+    return { "available": len(commits) > 0, "commits": commits }
+
+post endpoint("/api/update"):
+    string repo = await source_repo()
+    if repo == "":
+        return { "ok": false, "error": "no se sabe desde dónde se instaló" }.status(400)
+    os.make_dir(os.path_dirname(update_log()))
+    # setsid -f: el script sigue aunque se cierre la ventana; la salida, al registro.
+    await os.run("setsid", ["-f", "bash", "-c", "exec bash \"$0\" > \"$1\" 2>&1 < /dev/null",
+        os.path_join(repo, "desktop/deploy/update.sh"), update_log()],
+        { "timeout_ms": 5000, "env": { "GIT_TERMINAL_PROMPT": "0" } })
+    return { "ok": true }
+
+get endpoint("/api/update/log"):
+    if not os.path_exists(update_log()):
+        return { "state": "idle", "log": "" }
+    string text_log = await os.read_file(update_log())
+    string state_name = "running"
+    if text_log.contains("==> LISTO"):
+        state_name = "done"
+    else if text_log.contains("==> ERROR"):
+        state_name = "error"
+    if len(text_log) > 4000:
+        text_log = text_log.slice(len(text_log) - 4000, len(text_log))
+    return { "state": state_name, "log": text_log }
+
+# Tras actualizar: abre la versión nueva y cierra esta.
+post endpoint("/api/restart"):
+    # Sin redirigir, la app nueva hereda nuestra salida y os.run espera hasta el timeout.
+    await os.run("setsid", ["-f", "sh", "-c", "exec > /dev/null 2>&1 < /dev/null; sleep 1; exec /usr/local/bin/bigjpg-desktop"], { "timeout_ms": 5000 })
+    window.close()
+    return { "ok": true }
+
+# Una ruta de la API que no existe es un 404 y no la página de inicio.
+any endpoint("/api/*"):
+    return status(404)

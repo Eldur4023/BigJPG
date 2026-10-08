@@ -1,0 +1,156 @@
+# Trabajos: vistas, cola local y espejo de los trabajos que corren en el servidor.
+#
+# Un trabajo «local» pasa por el Real-ESRGAN de este equipo, de uno en uno (la GPU es una sola). Un trabajo
+# «server» se sube al servidor de BigJPG, que lo encola y lo ejecuta allí; aquí se refleja su estado cada
+# pocos segundos y, al terminar, se trae el resultado a disco. Para la interfaz son lo mismo.
+
+fn string data_dir():
+    return os.getenv("BIGJPG_DATA_DIR", "./data")
+
+fn string jobs_root():
+    return os.path_join(data_dir(), "jobs")
+
+fn string job_dir(string id):
+    return os.path_join(jobs_root(), id)
+
+fn long keep_ms():
+    return int(os.getenv("BIGJPG_KEEP_HOURS", "72")) * 3600000
+
+fn int max_queue():
+    return 20
+
+fn string ext_of(string image_format):
+    return image_format == "jpeg" ? "jpg" : image_format
+
+fn Json job_view(Json r):
+    return {
+        "id": r["id"], "name": r["name"], "model": r["model"], "scale": r["scale"], "format": r["fmt"], "target": r["target"],
+        "status": r["status"], "progress": r["progress"], "error": r["error"],
+        "in": { "w": r["in_w"], "h": r["in_h"], "bytes": r["in_bytes"] },
+        "out": { "w": r["out_w"], "h": r["out_h"], "bytes": r["out_bytes"] },
+        "created_at": r["created_at"], "started_at": r["started_at"], "finished_at": r["finished_at"]
+    }
+
+fn Json get_job(string id):
+    return first(await sqlite.query("select * from jobs where id = ?", id))
+
+fn bool remove_job(string id):
+    string dir = job_dir(id)
+    if os.is_dir(dir):
+        os.remove_dir(dir, true)
+    await sqlite.exec("delete from jobs where id = ?", id)
+    return true
+
+# ── cola local ──────────────────────────────────────────────────────────────
+
+fn bool run_next():
+    Json job = first(await sqlite.query("select * from jobs where status = 'queued' and target = 'local' order by created_at limit 1"))
+    if job == null:
+        return false
+    int taken = await sqlite.exec("update jobs set status = 'running', progress = 0, started_at = ? where id = ? and status = 'queued'", time.now(), job["id"])
+    if taken == 0:
+        return true
+    Json res = await run_engine(job)
+    if res["device"] != "":
+        await meta_set("device", res["device"])
+    Json cur = await get_job(job["id"])
+    if cur == null:
+        return true
+    long now = time.now()
+    if res["ok"]:
+        Json info = await image.info(job["out_path"])
+        await sqlite.exec("update jobs set status = 'done', progress = 100, out_w = ?, out_h = ?, out_bytes = ?, finished_at = ? where id = ?",
+            info["width"], info["height"], os.file_size(job["out_path"]), now, job["id"])
+    else if cur["status"] == "running":
+        await sqlite.exec("update jobs set status = 'error', error = ?, finished_at = ? where id = ?", res["error"], now, job["id"])
+        log.warn("trabajo " + job["id"] + " falló: " + res["error"])
+    else:
+        if os.is_file(job["out_path"]):
+            os.remove_file(job["out_path"])
+    return true
+
+every "1s":
+    int n = state.incr("runner_lock")
+    if n > 1:
+        state.decr("runner_lock")
+    else:
+        try:
+            await run_next()
+        catch e:
+            log.error("fallo en la cola local: " + e.message)
+        state.set("runner_lock", 0)
+
+# ── espejo de los trabajos del servidor ─────────────────────────────────────
+
+fn bool mirror_one(Json job):
+    string url = await server_url()
+    Json r = null
+    try:
+        r = await http.get(url + "/api/jobs/" + job["remote_id"], {}, { "timeout_ms": 5000 })
+    catch e:
+        r = null
+    long now = time.now()
+    if r == null or r["status"] == 0 or r["status"] >= 500:
+        # Sin servidor: se aguanta un rato (unos 90 s) antes de darlo por perdido.
+        if job["fails"] >= 30:
+            await sqlite.exec("update jobs set status = 'error', error = 'se perdió la conexión con el servidor', finished_at = ? where id = ?", now, job["id"])
+        else:
+            await sqlite.exec("update jobs set fails = fails + 1 where id = ?", job["id"])
+        return false
+    if r["status"] == 404:
+        await sqlite.exec("update jobs set status = 'error', error = 'el servidor ya no tiene este trabajo', finished_at = ? where id = ?", now, job["id"])
+        return false
+    if r["status"] != 200:
+        return false
+    Json b = r["body"]
+    string st = str(b["status"])
+    if st == "done":
+        if await remote_download(job["remote_id"], job["out_path"]):
+            Json info = await image.info(job["out_path"])
+            await sqlite.exec("update jobs set status = 'done', progress = 100, fails = 0, out_w = ?, out_h = ?, out_bytes = ?, finished_at = ? where id = ?",
+                info["width"], info["height"], os.file_size(job["out_path"]), now, job["id"])
+            await remote_delete(job["remote_id"])
+        else:
+            await sqlite.exec("update jobs set fails = fails + 1 where id = ?", job["id"])
+            if job["fails"] >= 10:
+                await sqlite.exec("update jobs set status = 'error', error = 'no se pudo traer el resultado del servidor', finished_at = ? where id = ?", now, job["id"])
+    else if st == "error" or st == "canceled":
+        await sqlite.exec("update jobs set status = 'error', error = ?, finished_at = ? where id = ?", st == "canceled" ? "cancelado en el servidor" : str(b["error"]), now, job["id"])
+    else:
+        await sqlite.exec("update jobs set status = ?, progress = ?, fails = 0, started_at = coalesce(started_at, ?) where id = ?", st, b["progress"], now, job["id"])
+    return true
+
+every "2s":
+    int n = state.incr("mirror_lock")
+    if n > 1:
+        state.decr("mirror_lock")
+    else:
+        try:
+            for Json j in await sqlite.query("select * from jobs where target = 'server' and status in ('queued', 'running')"):
+                await mirror_one(j)
+        catch e:
+            log.error("fallo al reflejar el servidor: " + e.message)
+        state.set("mirror_lock", 0)
+
+# ── limpieza ────────────────────────────────────────────────────────────────
+
+fn int purge_old():
+    long cutoff = time.now() - keep_ms()
+    int removed = 0
+    for Json r in await sqlite.query("select id from jobs where status in ('done', 'error', 'canceled') and finished_at < ?", cutoff):
+        await remove_job(r["id"])
+        removed = removed + 1
+    if os.is_dir(jobs_root()):
+        for string name in os.list_dir(jobs_root()):
+            if first(await sqlite.query("select id from jobs where id = ?", name)) == null:
+                os.remove_dir(os.path_join(jobs_root(), name), true)
+                removed = removed + 1
+    return removed
+
+every "10m":
+    try:
+        int r = await purge_old()
+        if r > 0:
+            log.info("limpieza: " + str(r) + " trabajo(s) antiguos eliminados")
+    catch e:
+        log.error("fallo en la limpieza: " + e.message)

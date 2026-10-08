@@ -1,0 +1,71 @@
+# Esquema, migraciones y consultas de uso común (como en el servidor, con `target` y `remote_id`).
+#
+# MIGRACIONES. `migrations()` es una lista de versiones: la posición N lleva el esquema de la versión N a la
+# N+1. Para cambiar el esquema se AÑADE una versión al final; nunca se edita una anterior.
+
+fn List<Json> migrations():
+    return [
+        [
+            """
+            create table jobs (
+                id text primary key,
+                name text not null,
+                model text not null,
+                scale integer not null,
+                fmt text not null,
+                target text not null default 'local',        -- local | server
+                remote_id text not null default '',          -- el id del trabajo en el servidor
+                status text not null default 'queued',       -- queued | running | done | error | canceled
+                progress real not null default 0,
+                error text not null default '',
+                in_path text not null,
+                out_path text not null default '',
+                in_bytes integer not null default 0,
+                out_bytes integer not null default 0,
+                in_w integer not null default 0,
+                in_h integer not null default 0,
+                out_w integer not null default 0,
+                out_h integer not null default 0,
+                fails integer not null default 0,            -- sondeos fallidos seguidos al servidor
+                created_at integer not null,
+                started_at integer,
+                finished_at integer
+            )
+            """,
+            "create index ix_jobs_status on jobs (status, target, created_at)",
+            "create table meta (key text primary key, value text not null)"
+        ]
+    ]
+
+on start:
+    await sqlite.exec("create table if not exists schema_version (version integer not null)")
+    List<Json> v = await sqlite.query("select version from schema_version")
+    int current = 0
+    if len(v) == 0:
+        await sqlite.exec("insert into schema_version (version) values (0)")
+    else:
+        current = v[0]["version"]
+    List<Json> all = migrations()
+    while current < len(all):
+        await sqlite.begin()
+        for string ddl in all[current]:
+            await sqlite.exec(ddl)
+        current = current + 1
+        await sqlite.exec("update schema_version set version = ?", current)
+        await sqlite.commit()
+        log.info("esquema migrado a la versión " + str(current))
+    await sqlite.exec("update jobs set status = 'queued', progress = 0, started_at = null where status = 'running' and target = 'local'")
+
+fn Json first(List<Json> rows):
+    return len(rows) == 0 ? null : rows[0]
+
+fn string new_id():
+    return hash.random_hex(12)
+
+fn string meta_get(string key, string fallback):
+    Json r = first(await sqlite.query("select value from meta where key = ?", key))
+    return r == null ? fallback : str(r["value"])
+
+fn bool meta_set(string key, string value):
+    await sqlite.exec("insert into meta (key, value) values (?, ?) on conflict(key) do update set value = excluded.value", key, value)
+    return true

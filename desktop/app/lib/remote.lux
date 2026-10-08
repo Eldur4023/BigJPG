@@ -1,0 +1,69 @@
+# El servidor de BigJPG (la misma API que sirve la web), por Tailscale.
+#
+# Las subidas y la descarga del resultado van con curl: el cliente http de Lux no sabe hacer multipart ni
+# guardar un binario a disco, y curl está en todas partes.
+
+fn string server_url():
+    return await meta_get("server_url", "")
+
+fn Json csrf():
+    return { "X-Requested-With": "bigjpg" }
+
+# {"ok", "ready", "device", "error"}, con una caché de 15 s: la interfaz pregunta cada pocos segundos y no
+# hay por qué esperar al servidor en cada pregunta.
+fn Json remote_state(bool fresh):
+    string url = await server_url()
+    if url == "":
+        return { "ok": false, "configured": false, "ready": false, "device": "", "error": "sin configurar" }
+    Json cached = state.get("remote_state", null)
+    if not fresh and cached != null and time.now() - cached["at"] < 15000 and cached["url"] == url:
+        return cached["value"]
+    Json value = null
+    try:
+        Json r = await http.get(url + "/api/info", {}, { "timeout_ms": 4000 })
+        if r["status"] == 200 and r["body"] != null and r["body"]["mode"] == "server":
+            value = { "ok": true, "configured": true, "ready": r["body"]["engine"]["ready"] == true, "device": str(r["body"]["engine"]["device"]), "error": r["body"]["engine"]["ready"] == true ? "" : "el servidor no tiene el motor instalado" }
+        else:
+            value = { "ok": false, "configured": true, "ready": false, "device": "", "error": "eso no parece un servidor de BigJPG (respondió " + str(r["status"]) + ")" }
+    catch e:
+        value = { "ok": false, "configured": true, "ready": false, "device": "", "error": "no responde: " + e.message }
+    state.set("remote_state", { "at": time.now(), "url": url, "value": value })
+    return value
+
+# Sube un trabajo al servidor. Devuelve {"ok", "remote_id", "error"}.
+fn Json remote_upload(Json job):
+    string url = await server_url()
+    # El nombre que viaja en el multipart: sin comillas, punto y coma ni nada raro.
+    string safe = regex.replace("[^A-Za-z0-9._ -]", job["name"], "_")
+    Json r = await os.run("curl", ["-s", "-m", "110", "-w", "\n%{http_code}", "-H", "X-Requested-With: bigjpg",
+        "-F", "file=@" + job["in_path"] + ";filename=" + safe,
+        url + "/api/jobs?model=" + job["model"] + "&scale=" + str(job["scale"]) + "&fmt=" + job["fmt"]], { "timeout_ms": 118000 })
+    string out = str(r["stdout"])
+    List<string> lines = out.split("\n")
+    if r["status"] != 0 or len(lines) < 2:
+        return { "ok": false, "remote_id": "", "error": "no se pudo subir al servidor: " + str(r["stderr"]).trim() }
+    string code = lines[len(lines) - 1]
+    string body = out.slice(0, len(out) - len(code) - 1)
+    Json parsed = null
+    try:
+        parsed = json.parse(body)
+    catch e:
+        parsed = null
+    if code != "201" or parsed == null or parsed["id"] == null:
+        string why = parsed != null and parsed["detail"] != null ? str(parsed["detail"]) : "el servidor respondió " + code
+        return { "ok": false, "remote_id": "", "error": why }
+    return { "ok": true, "remote_id": str(parsed["id"]), "error": "" }
+
+# Trae el resultado ya terminado del servidor a `dest`.
+fn bool remote_download(string remote_id, string dest):
+    string url = await server_url()
+    Json r = await os.run("curl", ["-sf", "-m", "110", "-o", dest, url + "/api/jobs/" + remote_id + "/result"], { "timeout_ms": 118000 })
+    return r["status"] == 0 and os.is_file(dest)
+
+fn bool remote_delete(string remote_id):
+    string url = await server_url()
+    try:
+        await http.delete(url + "/api/jobs/" + remote_id, csrf(), { "timeout_ms": 4000 })
+    catch e:
+        return false
+    return true

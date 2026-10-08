@@ -1,0 +1,98 @@
+# El motor: Real-ESRGAN ncnn-Vulkan, un binario externo (lo trae engine/install-engine.sh).
+#
+# Se lanza con proc.start() y la salida de errores a un fichero: el motor escribe ahí su progreso
+# («12.50%») y los dispositivos Vulkan que ve. Aquí se sondea ese fichero mientras corre.
+
+fn string engine_dir():
+    return os.getenv("BIGJPG_ENGINE_DIR", "/opt/bigjpg-desktop/engine")
+
+fn string engine_bin():
+    return os.path_join(engine_dir(), "realesrgan-ncnn-vulkan")
+
+fn bool engine_ready():
+    return os.is_file(engine_bin()) and os.is_dir(os.path_join(engine_dir(), "models"))
+
+# Los modelos que se ofrecen. `engine` es el nombre del modelo en el motor.
+fn List<Json> models():
+    return [
+        { "id": "anime", "name": "Anime e ilustración", "desc": "Líneas limpias y colores planos. El mejor para dibujos.", "engine": "realesrgan-x4plus-anime", "scales": [4] },
+        { "id": "foto", "name": "Fotografía", "desc": "Texturas y detalle de fotos y capturas.", "engine": "realesrgan-x4plus", "scales": [4] },
+        { "id": "rapido", "name": "Anime rápido", "desc": "Más ligero y con ×2, ×3 o ×4. Para fotogramas y capturas de anime.", "engine": "realesr-animevideov3", "scales": [2, 3, 4] }
+    ]
+
+fn Json find_model(string id):
+    for Json m in models():
+        if m["id"] == id:
+            return m
+    return null
+
+fn long max_pixels():
+    return int(os.getenv("BIGJPG_MAX_PIXELS", "16000000"))
+
+# Último porcentaje que ha escrito el motor, o -1.
+fn float last_percent(string log_text):
+    List<string> found = regex.find_all("[0-9]+\\.[0-9]+%", log_text)
+    if len(found) == 0:
+        return -1.0
+    string last = found[len(found) - 1]
+    return float(last.slice(0, len(last) - 1))
+
+# Nombre del primer dispositivo Vulkan que enumera el motor («AMD Radeon 660M (RADV REMBRANDT)»).
+fn string device_name(string log_text):
+    List<string> g = regex.groups("\\[0 ([^\\]]+)\\]", log_text)
+    return g == null ? "" : g[1]
+
+# Del registro del motor se quitan las líneas de dispositivos y de progreso: lo que queda es el error.
+fn string error_text(string log_text):
+    List<string> keep = []
+    for string line in log_text.split("\n"):
+        string l = line.trim()
+        if l == "" or l.starts_with("[") or regex.test("^[0-9.]+%$", l):
+            continue
+        keep.add(l)
+    string joined = keep.join(" · ")
+    return text.truncate(joined, 300)
+
+# Ejecuta el motor para un trabajo. Devuelve {"ok", "error", "device"}. `cancelled()` se consulta entre sondeos.
+fn Json run_engine(Json job):
+    string dir = os.path_dirname(job["in_path"])
+    string logfile = os.path_join(dir, "engine.log")
+    Json m = find_model(job["model"])
+    if m == null:
+        return { "ok": false, "error": "modelo desconocido", "device": "" }
+    List<string> args = ["-i", job["in_path"], "-o", job["out_path"], "-n", m["engine"], "-s", str(job["scale"]),
+                         "-f", job["fmt"], "-m", os.path_join(engine_dir(), "models")]
+    string gpu = os.getenv("BIGJPG_GPU", "auto")
+    if gpu != "" and gpu != "auto":
+        args.add("-g")
+        args.add(gpu)
+    int h = proc.start(engine_bin(), args, { "stdout": "null", "stderr": logfile })
+    long deadline = time.now() + 45 * 60 * 1000
+    Json code = null
+    string log_text = ""
+    float shown = -1.0
+    while code == null and time.now() < deadline:
+        code = await proc.wait(h, 700)
+        if os.path_exists(logfile):
+            log_text = await os.read_file(logfile)
+        float pct = last_percent(log_text)
+        if pct >= 0.0 and pct != shown:
+            shown = pct
+            await sqlite.exec("update jobs set progress = ? where id = ? and status = 'running'", pct, job["id"])
+        Json cur = first(await sqlite.query("select status from jobs where id = ?", job["id"]))
+        if cur == null or cur["status"] != "running":
+            break
+    string device = device_name(log_text)
+    if code == null:
+        proc.kill(h)
+        await proc.wait(h, 3000)
+        proc.close(h)
+        Json cur2 = first(await sqlite.query("select status from jobs where id = ?", job["id"]))
+        if cur2 == null or cur2["status"] != "running":
+            return { "ok": false, "error": "cancelado", "device": device }
+        return { "ok": false, "error": "el motor tardó más de 45 minutos y se detuvo", "device": device }
+    proc.close(h)
+    if code != 0 or not os.is_file(job["out_path"]):
+        string why = error_text(log_text)
+        return { "ok": false, "error": why == "" ? "el motor terminó con código " + str(code) : why, "device": device }
+    return { "ok": true, "error": "", "device": device }

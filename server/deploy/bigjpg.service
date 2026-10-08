@@ -1,0 +1,51 @@
+[Unit]
+Description=BigJPG — ampliar imágenes con IA (Lux + Real-ESRGAN)
+After=network-online.target tailscaled.service
+Wants=network-online.target tailscaled.service
+
+[Service]
+Type=exec
+User=bigjpg
+Group=bigjpg
+# Vulkan (la GPU) se abre por /dev/dri/renderD128, que es del grupo «render»; sin él el motor cae a CPU por software.
+SupplementaryGroups=render video
+WorkingDirectory=/opt/bigjpg
+# La caché de shaders de Mesa va a un sitio escribible.
+Environment=HOME=/var/lib/bigjpg
+Environment="PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+
+# La dirección, el puerto y las rutas se leen de aquí.
+EnvironmentFile=/etc/bigjpg/bigjpg.env
+
+# El lanzador monta los argumentos de Lux a partir de ese fichero.
+ExecStart=/opt/bigjpg/run.sh
+
+Restart=on-failure
+RestartSec=5
+
+# Lux escucha sólo en la IP de Tailscale (BIGJPG_HOST, de bigjpg.env): ni LAN ni Internet.
+
+# --- Endurecimiento -------------------------------------------------------
+# (sin PrivateDevices: la GPU está en /dev/dri; sin MemoryDenyWriteExecute: los drivers Vulkan compilan shaders)
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+RestrictNamespaces=yes
+LockPersonality=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+UMask=0027
+
+# Únicos directorios en los que el servicio puede escribir: subidas, resultados, base de datos y caché.
+ReadWritePaths=/var/lib/bigjpg
+StateDirectory=bigjpg
+
+# Una subida de decenas de MB y el motor de GPU abren bastantes descriptores.
+LimitNOFILE=65535
+
+[Install]
+WantedBy=multi-user.target

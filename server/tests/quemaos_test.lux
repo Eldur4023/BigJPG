@@ -1,0 +1,75 @@
+# Pruebas de la sonda de QuemaOS de BigJPG (server/quemaos) contra un servidor BigJPG de verdad (con el motor de pega).
+# Las lanza quemaos.sh en dos fases: con la app activa («activo:») y ya parada («caido:»).
+
+import test
+
+fn string url(string path):
+    return test.base_url() + path
+
+fn Json status_body():
+    return (await http.get(url("/quemaos/status")))["body"]
+
+test "activo: cumple el contrato":
+    await measure()
+    Json r = await http.get(url("/quemaos/status"))
+    test.eq(r["status"], 200)
+    Json b = r["body"]
+    test.eq(b["quemaos"], 1)
+    test.eq(b["id"], "bigjpg")
+    test.eq(b["name"], "BigJPG")
+    test.eq(b["status"], "ok")
+    test.ok(len(str(b["message"])) > 3)
+    test.ok(b["metrics"].has("en_cola") and b["metrics"].has("procesando") and b["metrics"].has("disco_libre_pct"))
+    test.eq(b["metrics"]["servidor_activo"], 1)
+    test.eq(b["metrics"]["motor_instalado"], 1)
+    # `extra.url` se ve como botón «Abrir» en QuemaOS
+    test.contains(str(b["extra"]["url"]), "http://")
+    test.eq((await http.get(url("/quemaos/status/")))["status"], 200)
+    test.eq((await http.get(url("/otra-cosa")))["status"], 404)
+
+test "activo: las métricas salen de la base y no cambian hasta que mide el reloj":
+    await measure()
+    Json before = await status_body()
+    int base = before["metrics"]["completados_24h"]
+    test.ok(base >= 1, "quemaos.sh dejó un trabajo hecho")
+    test.eq(before["extra"]["dispositivo"], "Fake GPU (TEST)")
+    # Se añade un trabajo terminado directamente en la base: la respuesta sigue siendo la de la caché...
+    await sqlite.exec("insert into jobs (id, name, model, scale, fmt, status, in_path, out_path, created_at, finished_at) values ('sonda-prueba-1', 'x.png', 'anime', 4, 'png', 'done', '/x/in.png', '/x/out.png', ?, ?)", time.now(), time.now())
+    test.eq((await status_body())["metrics"]["completados_24h"], base)
+    # ...hasta que el reloj (o este test) mide.
+    await measure()
+    Json after = await status_body()
+    test.eq(after["metrics"]["completados_24h"], base + 1)
+    test.contains(str(after["message"]), str(base + 1) + " hechos en 24 h")
+
+test "activo: medidas viejas avisan y luego dan error":
+    await measure()
+    Json d = state.get("probe", {})
+    d["at"] = time.now() - 100000
+    state.set("probe", d)
+    test.eq((await status_body())["status"], "warn")
+    d["at"] = time.now() - 400000
+    state.set("probe", d)
+    Json b = await status_body()
+    test.eq(b["status"], "error")
+    test.contains(b["message"], "reloj de medida")
+
+test "activo: sin el motor instalado, error":
+    string real = os.getenv("BIGJPG_ENGINE_DIR", "")
+    # se mide como si el motor no estuviera (otra ruta): el estado lo dice
+    await os.move(os.path_join(real, "realesrgan-ncnn-vulkan"), os.path_join(real, "x-oculto"))
+    await measure()
+    Json b = await status_body()
+    await os.move(os.path_join(real, "x-oculto"), os.path_join(real, "realesrgan-ncnn-vulkan"))
+    test.eq(b["status"], "error")
+    test.contains(b["message"], "Real-ESRGAN no está instalado")
+    test.eq(b["metrics"]["motor_instalado"], 0)
+    await measure()
+    test.eq((await status_body())["status"], "ok")
+
+test "caido: si BigJPG no responde, error":
+    await measure()
+    Json b = await status_body()
+    test.eq(b["status"], "error")
+    test.contains(b["message"], "no responde")
+    test.eq(b["metrics"]["servidor_activo"], 0)

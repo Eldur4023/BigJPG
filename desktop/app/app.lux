@@ -1,0 +1,40 @@
+# BigJPG — la ventana de escritorio (Lux Desktop: GTK + WebKitGTK, un solo binario).
+#
+# Es la misma interfaz que la web del servidor, con una opción más: hacer la ampliación en ESTE equipo (con el
+# Real-ESRGAN que trae el instalador) o en el SERVIDOR (se sube la imagen por Tailscale, se espera y se trae el
+# resultado). La web, en cambio, sólo existe en el propio servidor.
+#
+#   lib/db.lux      esquema y consultas       lib/jobs.lux    cola local y espejo de los trabajos del servidor
+#   lib/engine.lux  el motor local            lib/remote.lux  el servidor de BigJPG
+#   routes/api.lux  la API que usa la interfaz   routes/system.lux  ventana, bandeja y actualizaciones
+
+import window
+import sqlite
+import hash
+import time
+import json
+import os
+import regex
+import proc
+import image
+import text
+import http
+
+app:
+    name   "BigJPG"
+    # Sólo esta máquina: el runtime de escritorio se niega a arrancar si no.
+    host   "127.0.0.1"
+    max_body "60MB"
+
+    window:
+        title     "BigJPG"
+        width     1100
+        height    800
+        resizable true
+        icon      "./icon.png"
+
+    static "/" -> "./public"
+
+    sqlite:
+        file env("BIGJPG_DB", "./data/bigjpg.db")
+        pool 2

@@ -1,0 +1,171 @@
+# La API que usa la interfaz (la misma forma que la del servidor, más `target` y los ajustes del servidor).
+
+fn bool need_csrf():
+    if header("X-Requested-With", "") != "bigjpg":
+        abort(403, "Falta la cabecera X-Requested-With: bigjpg.")
+    return true
+
+fn Json queue_counts():
+    Json r = first(await sqlite.query("select sum(status = 'queued') as q, sum(status = 'running') as r, sum(status = 'done') as d, sum(status = 'error') as e, count(*) as n from jobs"))
+    return { "queued": r["q"] == null ? 0 : r["q"], "running": r["r"] == null ? 0 : r["r"], "done": r["d"] == null ? 0 : r["d"], "error": r["e"] == null ? 0 : r["e"], "total": r["n"] }
+
+fn Json info_body():
+    Json remote = await remote_state(false)
+    return {
+        "mode": "desktop",
+        "version": "2.0.0",
+        "engines": {
+            "local": { "ready": engine_ready(), "device": await meta_get("device", "") },
+            "server": { "configured": remote["configured"], "url": await server_url(), "ready": remote["ready"], "device": remote["device"], "error": remote["error"] }
+        },
+        "models": models(),
+        "formats": ["png", "jpg", "webp"],
+        "limits": { "max_pixels": max_pixels(), "max_queue": max_queue(), "keep_hours": int(os.getenv("BIGJPG_KEEP_HOURS", "72")) },
+        "queue": await queue_counts()
+    }
+
+on error:
+    int code = error.code
+    string detail = error.message
+    if code == 422 and len(error.messages) > 0:
+        detail = error.messages.join(" ")
+    if code == 413:
+        detail = "La imagen es demasiado grande."
+    # 502/503 llevan un mensaje pensado para el usuario («el servidor no responde»); el resto de 5xx, no.
+    if code >= 500 and code != 502 and code != 503:
+        log.error("error " + str(code) + " en " + request.method + " " + request.path + ": " + error.message)
+        detail = "Error interno."
+    return { "detail": detail }
+
+group("/api"):
+    get endpoint("/info"):
+        return await info_body()
+
+    get endpoint("/jobs"):
+        List<Json> out = []
+        for Json r in await sqlite.query("select * from jobs order by created_at desc limit 100"):
+            out.add(job_view(r))
+        return { "jobs": out }
+
+    get endpoint("/jobs/:id", string id):
+        Json r = await get_job(id)
+        if r == null:
+            abort(404, "No existe ese trabajo.")
+        return job_view(r)
+
+    # Guarda la ficha del servidor. Con la dirección vacía, la olvida.
+    post endpoint("/settings", Json body):
+        need_csrf()
+        string url = str(body["server_url"]).trim()
+        while url.ends_with("/"):
+            url = url.slice(0, len(url) - 1)
+        if url != "" and not (url.starts_with("http://") or url.starts_with("https://")):
+            return { "ok": false, "error": "La dirección debe empezar por http:// o https://" }.status(400)
+        await meta_set("server_url", url)
+        if url == "":
+            state.remove("remote_state")
+            return { "ok": true, "device": "" }
+        Json st = await remote_state(true)
+        if not st["ok"]:
+            return { "ok": false, "error": "Guardada, pero " + str(st["error"]) }.status(400)
+        return { "ok": true, "device": st["device"] }
+
+    # Sube una imagen (multipart, campo «file») y la encola, en este equipo o en el servidor.
+    post endpoint("/jobs", File file, string model = "anime", int scale = 4, string fmt = "png", string target = "local"):
+        need_csrf()
+        if not ["local", "server"].contains(target):
+            abort(400, "target debe ser local o server.")
+        if target == "local" and not engine_ready():
+            abort(503, "Real-ESRGAN no está instalado en este equipo.")
+        if target == "server":
+            Json st = await remote_state(false)
+            if not st["configured"]:
+                abort(503, "Falta configurar el servidor (⚙).")
+            if not st["ok"]:
+                abort(503, "El servidor no responde: " + str(st["error"]))
+        Json m = find_model(model)
+        if m == null:
+            abort(400, "Modelo desconocido: " + model)
+        if not m["scales"].contains(scale):
+            abort(400, "Ese modelo no admite ×" + str(scale) + ".")
+        if not ["png", "jpg", "webp"].contains(fmt):
+            abort(400, "Formato de salida no válido: " + fmt)
+        Json counts = await queue_counts()
+        if counts["queued"] + counts["running"] >= max_queue():
+            abort(429, "Hay demasiados trabajos en cola.")
+
+        string id = new_id()
+        string dir = job_dir(id)
+        os.make_dir(data_dir())
+        os.make_dir(jobs_root())
+        os.make_dir(dir)
+        string saved = file.save(dir)
+        string tmp = os.path_join(dir, saved)
+        Json info = null
+        try:
+            info = await image.info(tmp)
+        catch e:
+            info = null
+        if info == null or info["width"] == null or not ["jpeg", "png", "webp"].contains(str(info["format"])):
+            os.remove_dir(dir, true)
+            abort(400, "No es una imagen JPG, PNG o WebP.")
+        if info["width"] * info["height"] > max_pixels():
+            os.remove_dir(dir, true)
+            abort(413, "La imagen tiene más de " + str(int(max_pixels() / 1000000)) + " megapíxeles.")
+        string in_path = os.path_join(dir, "in." + ext_of(str(info["format"])))
+        await os.move(tmp, in_path)
+        string out_path = os.path_join(dir, "out." + fmt)
+        string name = text.truncate(os.path_basename(file.filename == null ? "imagen" : str(file.filename)), 120)
+        Json row = { "id": id, "name": name, "model": model, "scale": scale, "fmt": fmt, "in_path": in_path, "out_path": out_path }
+        string remote_id = ""
+        if target == "server":
+            Json up = null
+            try:
+                up = await remote_upload(row)
+            catch e:
+                up = { "ok": false, "remote_id": "", "error": "no se pudo subir al servidor: " + e.message }
+            if not up["ok"]:
+                os.remove_dir(dir, true)
+                abort(502, str(up["error"]))
+            remote_id = up["remote_id"]
+        await sqlite.exec(
+            "insert into jobs (id, name, model, scale, fmt, target, remote_id, in_path, out_path, in_bytes, in_w, in_h, out_w, out_h, created_at) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            id, name, model, scale, fmt, target, remote_id, in_path, out_path, os.file_size(in_path), info["width"], info["height"], info["width"] * scale, info["height"] * scale, time.now())
+        return job_view(await get_job(id)).status(201)
+
+    delete endpoint("/jobs/:id", string id):
+        need_csrf()
+        Json r = await get_job(id)
+        if r == null:
+            return { "ok": true }
+        if r["target"] == "server" and r["remote_id"] != "" and (r["status"] == "queued" or r["status"] == "running"):
+            await remote_delete(r["remote_id"])
+        if r["status"] == "running" and r["target"] == "local":
+            await sqlite.exec("update jobs set status = 'canceled', finished_at = ? where id = ?", time.now(), id)
+            return { "ok": true, "canceled": true }.status(202)
+        await remove_job(id)
+        return { "ok": true }
+
+    get endpoint("/jobs/:id/original", string id):
+        Json r = await get_job(id)
+        if r == null or not os.is_file(r["in_path"]):
+            abort(404, "No existe ese trabajo.")
+        return send_file(r["in_path"], { "inline": true }).header("Cache-Control", "private, max-age=3600")
+
+    get endpoint("/jobs/:id/thumb", string id):
+        Json r = await get_job(id)
+        if r == null or not os.is_file(r["in_path"]):
+            abort(404, "No existe ese trabajo.")
+        string thumb = os.path_join(os.path_dirname(r["in_path"]), "thumb.webp")
+        if not os.is_file(thumb):
+            await image.resize(r["in_path"], thumb, { "width": 360, "height": 360, "fit": "contain" })
+        return send_file(thumb, { "inline": true }).header("Cache-Control", "private, max-age=3600")
+
+    get endpoint("/jobs/:id/result", string id, int inline = 0):
+        Json r = await get_job(id)
+        if r == null or r["status"] != "done" or not os.is_file(r["out_path"]):
+            abort(404, "El resultado no está disponible.")
+        string base = r["name"]
+        int dot = base.index_of(".")
+        string stem = dot > 0 ? base.slice(0, dot) : base
+        return send_file(r["out_path"], { "filename": stem + "_x" + str(r["scale"]) + "." + r["fmt"], "inline": inline == 1 }).header("Cache-Control", "private, max-age=3600")

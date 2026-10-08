@@ -1,0 +1,191 @@
+# Pruebas de extremo a extremo de la API de BigJPG, con un motor de pega (fake-engine/) que imita la CLI de
+# Real-ESRGAN. Se lanzan con server/tests/run.sh, que prepara las variables y los ficheros de prueba.
+
+import http
+import test
+
+fn string url(string path):
+    return test.base_url() + path
+
+fn string files():
+    return os.getenv("BIGJPG_TEST_FILES", ".")
+
+fn Json get(string path):
+    return await http.get(url(path))
+
+# Sube un fichero con curl (multipart de verdad). Devuelve {status, body}; `csrf` false omite la cabecera.
+fn Json upload(string path, string query, bool csrf):
+    List<string> args = ["-s", "-m", "20", "-w", "\n%{http_code}", "-F", "file=@" + path]
+    if csrf:
+        args.add("-H")
+        args.add("X-Requested-With: bigjpg")
+    args.add(url("/api/jobs" + query))
+    Json r = await os.run("curl", args, { "timeout_ms": 30000 })
+    string out = str(r["stdout"])
+    int nl = out.index_of("\n")
+    # el código va tras el último salto de línea
+    List<string> parts = out.split("\n")
+    string code = parts[len(parts) - 1]
+    string body = out.slice(0, len(out) - len(code) - 1)
+    Json parsed = null
+    try:
+        parsed = json.parse(body)
+    catch e:
+        parsed = { "raw": body }
+    return { "status": int(code), "body": parsed }
+
+fn bool set_mode(string mode):
+    await os.write_file(os.path_join(os.getenv("BIGJPG_DATA_DIR", "."), "fake-engine-mode"), mode)
+    return true
+
+fn Json delete(string path, bool csrf):
+    return await http.delete(url(path), csrf ? { "X-Requested-With": "bigjpg" } : {})
+
+# Espera a que el trabajo salga de queued/running.
+fn Json wait_done(string id):
+    int i = 0
+    while i < 120:
+        Json r = await get("/api/jobs/" + id)
+        string st = r["body"]["status"]
+        if st != "queued" and st != "running":
+            return r["body"]
+        await sleep(250)
+        i = i + 1
+    return (await get("/api/jobs/" + id))["body"]
+
+test "info: modo servidor, motor listo y modelos":
+    Json r = await get("/api/info")
+    test.eq(r["status"], 200)
+    test.eq(r["body"]["mode"], "server")
+    test.eq(r["body"]["engine"]["ready"], true)
+    test.eq(len(r["body"]["models"]), 3)
+    test.eq(r["body"]["models"][0]["id"], "anime")
+    test.eq((await get("/healthz"))["body"]["status"], "ok")
+    # La interfaz se sirve desde la propia app.
+    test.eq((await http.get(url("/")))["status"], 200)
+
+test "ampliar una imagen de punta a punta":
+    await set_mode("ok")
+    Json up = await upload(files() + "/small.png", "?model=anime&scale=4&fmt=png", true)
+    test.eq(up["status"], 201, "subida: " + str(up["body"]))
+    string id = up["body"]["id"]
+    test.eq(up["body"]["in"]["w"], 8)
+    test.eq(up["body"]["out"]["w"], 32)
+    test.eq(up["body"]["out"]["h"], 24)
+    Json done = await wait_done(id)
+    test.eq(done["status"], "done", "estado final: " + str(done))
+    test.eq(done["progress"], 100)
+    test.eq(done["out"]["w"], 32)
+    test.ok(done["out"]["bytes"] > 0)
+    # El resultado, el original y la miniatura se pueden bajar.
+    Json res = await http.get(url("/api/jobs/" + id + "/result"))
+    test.eq(res["status"], 200)
+    test.contains(str(res["headers"]["content-disposition"]), "small_x4.png")
+    test.eq((await http.get(url("/api/jobs/" + id + "/result?inline=1")))["status"], 200)
+    test.eq((await http.get(url("/api/jobs/" + id + "/original")))["status"], 200)
+    Json th = await http.get(url("/api/jobs/" + id + "/thumb"))
+    test.eq(th["status"], 200)
+    test.contains(str(th["headers"]["content-type"]), "webp")
+    # Y sale en la lista y en la información de la cola.
+    Json list = await get("/api/jobs")
+    test.ok(len(list["body"]["jobs"]) >= 1)
+    test.ok((await get("/api/info"))["body"]["queue"]["done"] >= 1)
+    test.ok(len(str((await get("/api/info"))["body"]["engine"]["device"])) > 0, "el dispositivo se anota")
+
+test "entradas no válidas":
+    # sin la cabecera anti-CSRF
+    test.eq((await upload(files() + "/small.png", "?model=anime&scale=4", false))["status"], 403)
+    # no es una imagen
+    Json txt = await upload(files() + "/notimage.txt", "?model=anime&scale=4", true)
+    test.eq(txt["status"], 400)
+    test.contains(str(txt["body"]["detail"]), "No es una imagen")
+    # modelo, escala y formato
+    test.eq((await upload(files() + "/small.png", "?model=inventado&scale=4", true))["status"], 400)
+    test.eq((await upload(files() + "/small.png", "?model=anime&scale=2", true))["status"], 400)
+    test.eq((await upload(files() + "/small.png", "?model=anime&scale=4&fmt=gif", true))["status"], 400)
+    # demasiados píxeles (el límite de las pruebas son 1000)
+    Json big = await upload(files() + "/big.png", "?model=anime&scale=4", true)
+    test.eq(big["status"], 413)
+    # nada de lo rechazado queda en disco ni en la lista
+    List<string> dirs = os.list_dir(os.path_join(os.getenv("BIGJPG_DATA_DIR", "."), "jobs"))
+    int rows = (await sqlite.query("select count(*) as n from jobs"))[0]["n"]
+    test.eq(len(dirs), rows, "carpetas de trabajo = filas")
+    # los trabajos que no existen son 404; borrar sin cabecera, 403
+    test.eq((await get("/api/jobs/nada"))["status"], 404)
+    test.eq((await delete("/api/jobs/nada", false))["status"], 403)
+
+test "el modelo rápido admite ×2 y ×3":
+    await set_mode("ok")
+    Json up = await upload(files() + "/small.png", "?model=rapido&scale=2&fmt=png", true)
+    test.eq(up["status"], 201)
+    test.eq(up["body"]["out"]["w"], 16)
+    Json done = await wait_done(up["body"]["id"])
+    test.eq(done["status"], "done")
+    test.eq(done["out"]["w"], 16)
+
+test "si el motor falla, el error llega al usuario":
+    await set_mode("fail")
+    Json up = await upload(files() + "/small.png", "?model=foto&scale=4", true)
+    test.eq(up["status"], 201)
+    Json done = await wait_done(up["body"]["id"])
+    test.eq(done["status"], "error")
+    test.contains(str(done["error"]), "vkAllocateMemory")
+    test.ok(not str(done["error"]).contains("llvmpipe"), "el ruido de dispositivos no sale")
+    await set_mode("ok")
+
+test "cancelar un trabajo en marcha y que la cola siga":
+    await set_mode("slow")
+    Json a = await upload(files() + "/small.png", "?model=anime&scale=4", true)
+    Json b = await upload(files() + "/small.png", "?model=anime&scale=4", true)
+    string ida = a["body"]["id"]
+    string idb = b["body"]["id"]
+    # espera a que el primero esté corriendo con algo de progreso
+    int i = 0
+    Json ra = null
+    while i < 60:
+        ra = (await get("/api/jobs/" + ida))["body"]
+        if ra["status"] == "running" and ra["progress"] > 0:
+            break
+        await sleep(200)
+        i = i + 1
+    test.eq(ra["status"], "running")
+    test.ok(ra["progress"] > 0, "hay progreso: " + str(ra["progress"]))
+    # el segundo espera su turno
+    test.eq((await get("/api/jobs/" + idb))["body"]["status"], "queued")
+    # se cancela el primero: el motor se para y el segundo arranca
+    await set_mode("ok")
+    test.eq((await delete("/api/jobs/" + ida, true))["status"], 202)
+    int k = 0
+    Json rb = null
+    while k < 80:
+        rb = (await get("/api/jobs/" + idb))["body"]
+        if rb["status"] == "done":
+            break
+        await sleep(250)
+        k = k + 1
+    test.eq(rb["status"], "done", "el segundo terminó: " + str(rb))
+    test.eq((await get("/api/jobs/" + ida))["body"]["status"], "canceled")
+
+test "borrar un trabajo terminado quita sus ficheros":
+    await set_mode("ok")
+    Json up = await upload(files() + "/small.png", "?model=anime&scale=4", true)
+    string id = up["body"]["id"]
+    await wait_done(id)
+    string dir = os.path_join(os.getenv("BIGJPG_DATA_DIR", "."), "jobs", id)
+    test.ok(os.is_dir(dir))
+    test.eq((await delete("/api/jobs/" + id, true))["status"], 200)
+    test.ok(not os.is_dir(dir), "la carpeta se borra")
+    test.eq((await get("/api/jobs/" + id))["status"], 404)
+
+test "la limpieza quita lo viejo y las carpetas huérfanas":
+    await set_mode("ok")
+    Json up = await upload(files() + "/small.png", "?model=anime&scale=4", true)
+    string id = up["body"]["id"]
+    await wait_done(id)
+    # envejecer el trabajo 7 horas y dejar una carpeta sin trabajo
+    await sqlite.exec("update jobs set finished_at = ? where id = ?", time.now() - 7 * 3600000, id)
+    os.make_dir(os.path_join(os.getenv("BIGJPG_DATA_DIR", "."), "jobs", "huerfana"))
+    int removed = await purge_old()
+    test.ok(removed >= 2, "se quitaron " + str(removed))
+    test.eq((await get("/api/jobs/" + id))["status"], 404)
+    test.ok(not os.is_dir(os.path_join(os.getenv("BIGJPG_DATA_DIR", "."), "jobs", "huerfana")))

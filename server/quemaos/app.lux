@@ -1,0 +1,167 @@
+# BigJPG — sonda de estado para QuemaOS.
+#
+#   BIGJPG_DB=/var/lib/bigjpg/bigjpg.db lux --no-watch ./quemaos
+#
+# Contrato (el mismo que el de Homeflix, Drive y Calendar; ver Suite-Canon.md):
+#
+#   GET /quemaos/status -> {"quemaos": 1, "id": "bigjpg", "name": "BigJPG",
+#                           "status": "ok"|"warn"|"error", "message": "...",
+#                           "metrics": {...}, "extra": {...}}
+#
+# Es un PROCESO APARTE de la app (bigjpg.service): Lux sólo abre un puerto por app, y la sonda tiene que ir en el
+# suyo (rango 9700-9799 de la suite) para que una app ocupada con trabajos pesados no la deje en cola y dé un
+# falso «caído». La petición no toca la base ni el disco: contesta con lo último que midió el reloj de abajo (cada
+# 30 s), y si el reloj se para la propia sonda lo delata.
+#
+# Variables (las prepara quemaos-run.sh a partir de bigjpg.env): BIGJPG_DB (sólo se hacen SELECT), BIGJPG_URL (dónde
+# escucha la app, para comprobar /healthz), BIGJPG_ENGINE_DIR (¿está Real-ESRGAN?), BIGJPG_QUEMAOS_PORT (9702),
+# BIGJPG_QUEMAOS_HOST (127.0.0.1: QuemaOS sólo consulta el bucle local).
+
+import sqlite
+import http
+import os
+import time
+import json
+
+app:
+    name   "BigJPG (sonda QuemaOS)"
+    port   env("BIGJPG_QUEMAOS_PORT", "9702")
+    host   env("BIGJPG_QUEMAOS_HOST", "127.0.0.1")
+    max_body "1KB"
+
+    log:
+        level "info"
+        access false
+
+    sqlite:
+        file env("BIGJPG_DB")
+        pool 1
+
+fn string app_url():
+    return os.getenv("BIGJPG_URL", "http://127.0.0.1:5002")
+
+fn string human(long n):
+    if n < 1024:
+        return str(n) + " B"
+    if n < 1048576:
+        return str(int(n / 1024)) + " KB"
+    if n < 1073741824:
+        return str(int(n / 1048576)) + " MB"
+    return str(int(n / 1073741824)) + " GB"
+
+fn Json count(string sql):
+    List<Json> rows = await sqlite.query(sql)
+    return rows[0]["n"] == null ? 0 : rows[0]["n"]
+
+# Mide y deja el resultado en `state`. Es lo único que toca la base, el disco y la red.
+fn bool measure():
+    Json metrics = {}
+    Json extra = { "url": app_url(), "motor": "Real-ESRGAN ncnn-Vulkan" }
+    string status = "ok"
+    string message = ""
+    long day = time.now() - 86400000
+    try:
+        # Sólo SELECT: el driver de Lux no tiene modo de sólo lectura, así que esta garantía es de este fichero.
+        metrics["en_cola"] = await count("select count(*) as n from jobs where status = 'queued'")
+        metrics["procesando"] = await count("select count(*) as n from jobs where status = 'running'")
+        metrics["completados_24h"] = await count("select count(*) as n from jobs where status = 'done' and finished_at > " + str(day))
+        metrics["errores_24h"] = await count("select count(*) as n from jobs where status = 'error' and finished_at > " + str(day))
+        List<Json> dev = await sqlite.query("select value from meta where key = 'device'")
+        extra["dispositivo"] = len(dev) == 0 ? "aún sin usar" : str(dev[0]["value"])
+        # ¿Los últimos 3 trabajos terminados han fallado todos?
+        List<Json> last = await sqlite.query("select status from jobs where status in ('done', 'error') order by finished_at desc limit 3")
+        int bad = 0
+        for Json j in last:
+            if j["status"] == "error":
+                bad = bad + 1
+        metrics["ultimos_3_fallidos"] = bad
+    catch e:
+        state.set("probe", { "status": "error", "message": "La base de datos no responde: " + e.message, "metrics": metrics, "extra": extra, "at": time.now() })
+        return false
+
+    # ¿Responde la app? (healthz no toca nada pesado)
+    bool up = false
+    string why = ""
+    try:
+        Json r = await http.get(app_url() + "/healthz", {}, { "timeout_ms": 2000 })
+        up = r["status"] == 200
+        why = "respondió " + str(r["status"])
+    catch e:
+        why = e.message
+    metrics["servidor_activo"] = up ? 1 : 0
+
+    string engine = os.path_join(os.getenv("BIGJPG_ENGINE_DIR", "/opt/bigjpg/engine"), "realesrgan-ncnn-vulkan")
+    bool engine_ok = os.is_file(engine)
+    metrics["motor_instalado"] = engine_ok ? 1 : 0
+
+    string dbfile = os.getenv("BIGJPG_DB", "")
+    string where = os.getenv("BIGJPG_DATA_DIR", dbfile == "" ? "" : os.path_dirname(dbfile))
+    if where != "" and os.is_dir(where):
+        Json du = os.disk_usage(where)
+        long free_pct = du["total"] > 0 ? int(du["free"] * 1000 / du["total"]) : 0
+        metrics["disco_libre_pct"] = free_pct / 10.0
+        extra["disco_libre"] = human(du["free"]) + " de " + human(du["total"])
+        if free_pct < 30:
+            status = "error"
+            message = "Disco casi lleno: " + str(free_pct / 10.0) + " % libre"
+        else if free_pct < 100:
+            status = "warn"
+            message = "Poco espacio en disco: " + str(free_pct / 10.0) + " % libre"
+    if metrics["ultimos_3_fallidos"] >= 3:
+        status = "warn"
+        message = "Los últimos 3 trabajos han fallado"
+    if metrics["en_cola"] > 10 and status == "ok":
+        status = "warn"
+        message = str(metrics["en_cola"]) + " trabajos esperando en la cola"
+    if not engine_ok:
+        status = "error"
+        message = "Real-ESRGAN no está instalado (" + engine + ")"
+    if not up:
+        status = "error"
+        message = "BigJPG no responde (" + why + ")"
+    if message == "":
+        message = str(metrics["procesando"]) + " procesando, " + str(metrics["en_cola"]) + " en cola · " + str(metrics["completados_24h"]) + " hechos en 24 h"
+    state.set("probe", { "status": status, "message": message, "metrics": metrics, "extra": extra, "at": time.now() })
+    return true
+
+# El rango 9700-9799 lo impone el lanzador (quemaos-run.sh): una app Lux no puede salir desde `on start:`.
+# Si aun así arranca fuera de rango, la sonda lo dice en su estado.
+fn bool port_ok():
+    int port = int(os.getenv("BIGJPG_QUEMAOS_PORT", "9702"))
+    return port >= 9700 and port <= 9799
+
+on start:
+    state.set("probe", { "status": "warn", "message": "Arrancando: aún sin medidas", "metrics": {}, "extra": {}, "at": 0 })
+    if port_ok():
+        await measure()
+    else:
+        state.set("probe", { "status": "error", "message": "BIGJPG_QUEMAOS_PORT está fuera del rango 9700-9799 de la suite", "metrics": {}, "extra": {}, "at": 0 })
+
+every "30s":
+    try:
+        if port_ok():
+            await measure()
+    catch e:
+        log.error("sonda: fallo al medir: " + e.message)
+
+get endpoint("/quemaos/status"):
+    Json d = state.get("probe", { "status": "warn", "message": "sin medidas", "metrics": {}, "extra": {}, "at": 0 })
+    string status = d["status"]
+    string message = d["message"]
+    if d["at"] > 0:
+        long age = time.now() - d["at"]
+        if age > 300000:
+            status = "error"
+            message = "Sin medidas desde hace " + str(int(age / 60000)) + " min: el reloj de medida se ha parado"
+        else if age > 90000 and status == "ok":
+            status = "warn"
+            message = "Medidas desactualizadas (hace " + str(int(age / 1000)) + " s)"
+    return {
+        "quemaos": 1,
+        "id": "bigjpg",
+        "name": "BigJPG",
+        "status": status,
+        "message": message,
+        "metrics": d["metrics"],
+        "extra": d["extra"]
+    }

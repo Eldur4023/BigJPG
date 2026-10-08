@@ -1,0 +1,44 @@
+#!/usr/bin/env python3
+"""Motor de pega para las pruebas: imita la línea de órdenes de realesrgan-ncnn-vulkan (-i -o -n -s -f -m -g).
+
+Lee BIGJPG_DATA_DIR/fake-engine-mode: «ok» (por defecto), «fail» (falla como un motor sin memoria de GPU)
+o «slow» (tarda, para poder cancelar). Escribe un PNG de color liso con las dimensiones de entrada × escala."""
+import os, struct, sys, time, zlib
+
+args = sys.argv[1:]
+opts = {}
+i = 0
+while i < len(args):
+    if args[i] in ("-i", "-o", "-n", "-s", "-f", "-m", "-g", "-t", "-j"):
+        opts[args[i]] = args[i + 1]
+        i += 2
+    else:
+        i += 1
+
+mode_file = os.path.join(os.environ.get("BIGJPG_DATA_DIR", "."), "fake-engine-mode")
+mode = open(mode_file).read().strip() if os.path.exists(mode_file) else "ok"
+sys.stderr.write("[0 Fake GPU (TEST)]  queueC=1[4]  queueG=0[1]  queueT=0[1]\n[1 llvmpipe (LLVM)]  queueC=0[1]\n")
+sys.stderr.flush()
+if mode == "fail":
+    sys.stderr.write("vkAllocateMemory failed -2\nrealesrgan: no se pudo procesar\n")
+    sys.exit(1)
+
+with open(opts["-i"], "rb") as fh:
+    head = fh.read(32)
+w, h = struct.unpack(">II", head[16:24])           # IHDR de un PNG
+s = int(opts.get("-s", "4"))
+steps = 40 if mode == "slow" else 4
+for k in range(steps + 1):
+    sys.stderr.write("%.2f%%\n" % (100.0 * k / steps))
+    sys.stderr.flush()
+    time.sleep(0.25 if mode == "slow" else 0.15)
+
+def chunk(tag, data):
+    c = struct.pack(">I", len(data)) + tag + data
+    return c + struct.pack(">I", zlib.crc32(tag + data) & 0xFFFFFFFF)
+
+W, H = w * s, h * s
+raw = b"".join(b"\x00" + b"\xd9\x77\x57" * W for _ in range(H))
+png = b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", struct.pack(">IIBBBBB", W, H, 8, 2, 0, 0, 0)) + chunk(b"IDAT", zlib.compress(raw)) + chunk(b"IEND", b"")
+with open(opts["-o"], "wb") as out:
+    out.write(png)

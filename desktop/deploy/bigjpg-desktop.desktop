@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=BigJPG
+Comment=Amplía imágenes con IA: en este equipo o en tu servidor
+Exec=bigjpg-desktop
+# Ruta absoluta: con el nombre "bigjpg-desktop", KDE puede caer al icono genérico del tema.
+Icon=/usr/share/icons/hicolor/256x256/apps/bigjpg-desktop.png
+Terminal=false
+Categories=Graphics;Photography;
+Keywords=imagen;ampliar;upscale;esrgan;ia;

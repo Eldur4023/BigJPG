@@ -1,0 +1,108 @@
+# Trabajos: vistas, cola y limpieza.
+#
+# Un trabajo es una imagen que ampliar. La cola es la tabla `jobs`: el reloj de abajo coge el más antiguo en
+# estado «queued» y lo pasa por el motor, de uno en uno (la GPU es una sola). El estado viaja:
+# queued -> running -> done | error | canceled.
+
+fn string data_dir():
+    return os.getenv("BIGJPG_DATA_DIR", "./data")
+
+fn string jobs_root():
+    return os.path_join(data_dir(), "jobs")
+
+fn string job_dir(string id):
+    return os.path_join(jobs_root(), id)
+
+fn long keep_ms():
+    return int(os.getenv("BIGJPG_KEEP_HOURS", "6")) * 3600000
+
+fn int max_queue():
+    return 20
+
+# «jpeg» -> «jpg»: la extensión que usa el motor para elegir el formato.
+fn string ext_of(string image_format):
+    return image_format == "jpeg" ? "jpg" : image_format
+
+fn Json job_view(Json r):
+    return {
+        "id": r["id"], "name": r["name"], "model": r["model"], "scale": r["scale"], "format": r["fmt"],
+        "status": r["status"], "progress": r["progress"], "error": r["error"],
+        "in": { "w": r["in_w"], "h": r["in_h"], "bytes": r["in_bytes"] },
+        "out": { "w": r["out_w"], "h": r["out_h"], "bytes": r["out_bytes"] },
+        "created_at": r["created_at"], "started_at": r["started_at"], "finished_at": r["finished_at"]
+    }
+
+fn Json get_job(string id):
+    return first(await sqlite.query("select * from jobs where id = ?", id))
+
+# Borra el trabajo y sus ficheros.
+fn bool remove_job(string id):
+    string dir = job_dir(id)
+    if os.is_dir(dir):
+        os.remove_dir(dir, true)
+    await sqlite.exec("delete from jobs where id = ?", id)
+    return true
+
+# Pasa por el motor el trabajo más antiguo de la cola. Devuelve true si había alguno.
+fn bool run_next():
+    Json job = first(await sqlite.query("select * from jobs where status = 'queued' order by created_at limit 1"))
+    if job == null:
+        return false
+    int taken = await sqlite.exec("update jobs set status = 'running', progress = 0, started_at = ? where id = ? and status = 'queued'", time.now(), job["id"])
+    if taken == 0:
+        return true     # lo ha cancelado alguien entre medias
+    Json res = await run_engine(job)
+    if res["device"] != "":
+        await meta_set("device", res["device"])
+    Json cur = await get_job(job["id"])
+    if cur == null:
+        return true     # se borró mientras corría
+    long now = time.now()
+    if res["ok"]:
+        Json info = await image.info(job["out_path"])
+        await sqlite.exec("update jobs set status = 'done', progress = 100, out_w = ?, out_h = ?, out_bytes = ?, finished_at = ? where id = ?",
+            info["width"], info["height"], os.file_size(job["out_path"]), now, job["id"])
+        await meta_set("last_ok", str(now))
+    else if cur["status"] == "running":
+        await sqlite.exec("update jobs set status = 'error', error = ?, finished_at = ? where id = ?", res["error"], now, job["id"])
+        await meta_set("last_error", str(now))
+        log.warn("trabajo " + job["id"] + " falló: " + res["error"])
+    else:
+        # Cancelado a mitad: el motor ya está parado; se quita lo que dejara a medias.
+        if os.is_file(job["out_path"]):
+            os.remove_file(job["out_path"])
+    return true
+
+# El reloj de la cola. El cerrojo es atómico (state.incr) y se suelta siempre, falle lo que falle.
+every "1s":
+    int n = state.incr("runner_lock")
+    if n > 1:
+        state.decr("runner_lock")
+    else:
+        try:
+            await run_next()
+        catch e:
+            log.error("fallo en la cola: " + e.message)
+        state.set("runner_lock", 0)
+
+# Limpieza: lo terminado hace más de BIGJPG_KEEP_HOURS horas, y carpetas sin trabajo.
+fn int purge_old():
+    long cutoff = time.now() - keep_ms()
+    int removed = 0
+    for Json r in await sqlite.query("select id from jobs where status in ('done', 'error', 'canceled') and finished_at < ?", cutoff):
+        await remove_job(r["id"])
+        removed = removed + 1
+    if os.is_dir(jobs_root()):
+        for string name in os.list_dir(jobs_root()):
+            if first(await sqlite.query("select id from jobs where id = ?", name)) == null:
+                os.remove_dir(os.path_join(jobs_root(), name), true)
+                removed = removed + 1
+    return removed
+
+every "10m":
+    try:
+        int r = await purge_old()
+        if r > 0:
+            log.info("limpieza: " + str(r) + " trabajo(s) antiguos eliminados")
+    catch e:
+        log.error("fallo en la limpieza: " + e.message)

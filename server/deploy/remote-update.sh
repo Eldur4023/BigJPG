@@ -1,0 +1,135 @@
+#!/usr/bin/env bash
+#
+# Actualiza el código de una instalación ya existente, sin tocar la base de datos
+# ni bigjpg.env. Si el servicio no arranca con el código nuevo, vuelve a la
+# versión anterior.
+#
+# No se ejecuta a mano: lo lanza deploy.sh sobre el servidor. Para una instalación
+# desde cero, usa install.sh.
+#
+#   sudo bash deploy/remote-update.sh [PUERTO_HEALTHZ]
+
+set -euo pipefail
+
+APP_DIR=/opt/bigjpg
+ENV_FILE=/etc/bigjpg/bigjpg.env
+SERVICE_USER=bigjpg
+
+# El puerto se toma del propio servidor salvo que se indique otro: así la
+# comprobación final no falla por haberlo cambiado allí.
+HEALTH_PORT="${1:-}"
+if [[ -z "$HEALTH_PORT" && -f "$ENV_FILE" ]]; then
+    HEALTH_PORT="$(grep -E '^BIGJPG_PORT=' "$ENV_FILE" | cut -d= -f2 || true)"
+fi
+HEALTH_PORT="${HEALTH_PORT:-5002}"
+
+if [[ $EUID -ne 0 ]]; then
+    echo "Ejecútalo como root (sudo)." >&2
+    exit 1
+fi
+if [[ ! -f "$APP_DIR/app/app.lux" ]]; then
+    echo "No hay ninguna instalación en $APP_DIR. Usa install.sh." >&2
+    exit 1
+fi
+
+SOURCE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+PREVIOUS="$APP_DIR/previous"
+
+# Antes de parar nada: ¿compila el código nuevo con el Lux nuevo?
+NEW_LUX="$APP_DIR/lux"
+[[ -f "$SOURCE_DIR/lux" ]] && NEW_LUX="$SOURCE_DIR/lux"
+echo "==> Comprobando que el código nuevo compila"
+BIGJPG_DB=/dev/null "$NEW_LUX" --check "$SOURCE_DIR/app" >/dev/null
+BIGJPG_DB=/dev/null "$NEW_LUX" --check "$SOURCE_DIR/quemaos" >/dev/null
+
+echo "==> Comprobando el motor (Real-ESRGAN)"
+# Si esta versión trae otro paquete del motor, se instala ahora, antes de parar nada. Si ya está, no hace nada.
+bash "$SOURCE_DIR/engine/install-engine.sh" "$APP_DIR/engine"
+
+echo "==> Guardando la versión anterior"
+rm -rf "$PREVIOUS"
+mkdir -p "$PREVIOUS"
+cp -a "$APP_DIR/app" "$APP_DIR/lux" "$APP_DIR/run.sh" "$APP_DIR/deploy" "$PREVIOUS/"
+cp /etc/systemd/system/bigjpg.service "$PREVIOUS/bigjpg.service"
+# La sonda de QuemaOS puede no estar en instalaciones anteriores.
+HAD_PROBE=0
+if [[ -d "$APP_DIR/quemaos" ]]; then
+    HAD_PROBE=1
+    cp -a "$APP_DIR/quemaos" "$APP_DIR/quemaos-run.sh" "$PREVIOUS/"
+    cp /etc/systemd/system/bigjpg-quemaos.service "$PREVIOUS/bigjpg-quemaos.service"
+fi
+
+restaurar() {
+    echo "!!! La actualización ha fallado: se vuelve a la versión anterior." >&2
+    systemctl stop bigjpg-quemaos bigjpg || true
+    rm -rf "$APP_DIR/app" "$APP_DIR/deploy" "$APP_DIR/quemaos"
+    mv "$PREVIOUS/app" "$APP_DIR/app"
+    mv "$PREVIOUS/deploy" "$APP_DIR/deploy"
+    install -m 755 "$PREVIOUS/lux" "$APP_DIR/lux"
+    install -m 755 "$PREVIOUS/run.sh" "$APP_DIR/run.sh"
+    cp "$PREVIOUS/bigjpg.service" /etc/systemd/system/bigjpg.service
+    if [[ $HAD_PROBE -eq 1 ]]; then
+        mv "$PREVIOUS/quemaos" "$APP_DIR/quemaos"
+        install -m 755 "$PREVIOUS/quemaos-run.sh" "$APP_DIR/quemaos-run.sh"
+        cp "$PREVIOUS/bigjpg-quemaos.service" /etc/systemd/system/bigjpg-quemaos.service
+    else
+        rm -f "$APP_DIR/quemaos-run.sh" /etc/systemd/system/bigjpg-quemaos.service
+        systemctl disable bigjpg-quemaos 2>/dev/null || true
+    fi
+    rm -rf "$PREVIOUS"
+    systemctl daemon-reload
+    systemctl start bigjpg || true
+    [[ $HAD_PROBE -eq 1 ]] && { systemctl start bigjpg-quemaos || true; }
+    journalctl -u bigjpg -n 30 --no-pager >&2 || true
+    exit 1
+}
+trap restaurar ERR
+
+echo "==> Parando el servicio"
+systemctl stop bigjpg-quemaos 2>/dev/null || true
+systemctl stop bigjpg
+
+echo "==> Instalando el código nuevo"
+rm -rf "$APP_DIR/app" "$APP_DIR/deploy"
+cp -r "$SOURCE_DIR/app" "$APP_DIR/app"
+rm -rf "$APP_DIR/quemaos"
+cp -r "$SOURCE_DIR/quemaos" "$APP_DIR/quemaos"
+cp -r "$SOURCE_DIR/deploy" "$APP_DIR/deploy"
+rm -f "$APP_DIR/deploy/lux"
+install -m 755 "$NEW_LUX" "$APP_DIR/lux"
+install -m 755 "$SOURCE_DIR/deploy/run.sh" "$APP_DIR/run.sh"
+install -m 755 "$SOURCE_DIR/deploy/quemaos-run.sh" "$APP_DIR/quemaos-run.sh"
+cp "$SOURCE_DIR/deploy/bigjpg.service" /etc/systemd/system/bigjpg.service
+cp "$SOURCE_DIR/deploy/bigjpg-quemaos.service" /etc/systemd/system/bigjpg-quemaos.service
+# BigJPG escucha SÓLO en la IP de Tailscale. Instalaciones anteriores (127.0.0.1) se migran aquí.
+TS_IP="$(tailscale ip -4 2>/dev/null | head -1 || true)"
+[[ -n "$TS_IP" ]] || { echo "No encuentro la IP de Tailscale: BigJPG sólo escucha ahí." >&2; false; }
+if grep -q '^BIGJPG_HOST=' "$ENV_FILE"; then sed -i "s/^BIGJPG_HOST=.*/BIGJPG_HOST=$TS_IP/" "$ENV_FILE"; else printf 'BIGJPG_HOST=%s\n' "$TS_IP" >> "$ENV_FILE"; fi
+# Instalaciones anteriores a la sonda: se añade su puerto a bigjpg.env sin tocar lo demás.
+grep -q '^BIGJPG_QUEMAOS_PORT=' "$ENV_FILE" || printf '\n# Sonda de QuemaOS (rango 9700-9799 de la suite). 0.0.0.0 en BIGJPG_QUEMAOS_HOST la abre a la red.\nBIGJPG_QUEMAOS_PORT=9702\n' >> "$ENV_FILE"
+chown -R root:"$SERVICE_USER" "$APP_DIR"
+chmod -R g+rX "$APP_DIR"
+systemctl daemon-reload
+systemctl enable bigjpg-quemaos >/dev/null 2>&1
+
+echo "==> Arrancando el servicio"
+systemctl start bigjpg
+
+echo "==> Esperando a que responda"
+ok=0
+for _ in $(seq 1 20); do
+    if curl -fsS --max-time 3 "http://$TS_IP:$HEALTH_PORT/healthz" >/dev/null 2>&1; then
+        ok=1
+        break
+    fi
+    sleep 1
+done
+[[ $ok -eq 1 ]]    # si no, salta el trap y se restaura
+
+# La sonda no es imprescindible: si no arranca se avisa, pero no se deshace una actualización que funciona.
+systemctl start bigjpg-quemaos || echo "aviso: bigjpg-quemaos no arrancó (journalctl -u bigjpg-quemaos)" >&2
+
+trap - ERR
+rm -rf "$PREVIOUS"
+echo
+echo "BigJPG actualizado y respondiendo en http://$TS_IP:$HEALTH_PORT"

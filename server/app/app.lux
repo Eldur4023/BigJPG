@@ -1,0 +1,49 @@
+# BigJPG — ampliar imágenes con Real-ESRGAN, en tu servidor. App Lux.
+#
+#   BIGJPG_DB=./data/bigjpg.db BIGJPG_ENGINE_DIR=./engine lux ./server/app
+#
+# La inferencia la hace Real-ESRGAN ncnn-Vulkan (un binario externo que trae el instalador: ver
+# engine/install-engine.sh); aquí está todo lo demás: la web, la cola de trabajos y la API.
+# La web sólo se sirve desde el propio servidor y sólo escucha en la IP de Tailscale (BIGJPG_HOST).
+#
+# Variables (las lee run.sh desde /etc/bigjpg/bigjpg.env):
+#   BIGJPG_DB          fichero SQLite (obligatoria; se resuelve al compilar)
+#   BIGJPG_HOST        dirección de escucha: SIEMPRE la IP de Tailscale (el instalador la pone)
+#   BIGJPG_PORT        puerto (5002)
+#   BIGJPG_DATA_DIR    subidas y resultados (./data)
+#   BIGJPG_ENGINE_DIR  dónde está Real-ESRGAN (/opt/bigjpg/engine)
+#   BIGJPG_GPU         «auto» (defecto), o el número de dispositivo Vulkan (-g de realesrgan)
+#   BIGJPG_MAX_PIXELS  tamaño máximo de entrada en píxeles (16000000)
+#   BIGJPG_KEEP_HOURS  cuánto se conservan los trabajos terminados (6)
+
+import sqlite
+import hash
+import time
+import json
+import os
+import regex
+import proc
+import image
+import text
+
+app:
+    name      "BigJPG"
+    version   "2.0.0"
+    port      env("BIGJPG_PORT", "5002")
+    host      env("BIGJPG_HOST", "127.0.0.1")
+    max_body  env("BIGJPG_MAX_BODY", "60MB")
+
+    headers:
+        "X-Content-Type-Options" "nosniff"
+        "Referrer-Policy" "no-referrer"
+        "Content-Security-Policy" "default-src 'self'; img-src 'self' blob: data:; style-src 'self' 'unsafe-inline'; script-src 'self'; connect-src 'self'"
+
+    log:
+        level "info"
+        access false
+
+    static "/" -> "./public"
+
+    sqlite:
+        file env("BIGJPG_DB")
+        pool 2
