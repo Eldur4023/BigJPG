@@ -21,6 +21,10 @@
 
 <header class="top">
   <div class="brand"><span class="logo"><svg class="ico"><use href="#i-zoom"/></svg></span><b>BigJPG</b></div>
+  <div id="modes" class="seg" title="Qué hacer con los archivos">
+    <button data-mode="upscale">Ampliar</button>
+    <button data-mode="convert">Convertir</button>
+  </div>
   <div id="where" class="seg" hidden title="Dónde se hace la ampliación">
     <button data-target="local">Este equipo</button>
     <button data-target="server">Servidor</button>
@@ -38,7 +42,7 @@
     <svg class="ico big"><use href="#i-up"/></svg>
     <p><b>Suelta aquí las imágenes</b>, pégalas con <kbd>Ctrl</kbd>+<kbd>V</kbd> o <button id="btn-pick" class="link">elígelas</button></p>
     <p class="muted" id="drop-hint">JPG, PNG o WebP</p>
-    <input id="file" type="file" accept="image/jpeg,image/png,image/webp" multiple hidden>
+    <input id="file" type="file" multiple hidden>
   </section>
 
   <section id="staging" class="card" hidden>
@@ -46,13 +50,13 @@
   </section>
 
   <section class="card options" id="options">
-    <div class="opt-block">
+    <div class="opt-block" id="model-box">
       <h2>Tipo de imagen</h2>
       <div id="models" class="models"></div>
     </div>
     <div class="opt-row">
-      <div><h2>Escala</h2><div id="scales" class="pills"></div></div>
-      <div><h2>Formato</h2><div id="formats" class="pills"></div></div>
+      <div id="scale-box"><h2>Escala</h2><div id="scales" class="pills"></div></div>
+      <div><h2 id="fmt-title">Formato</h2><div id="formats" class="pills"></div></div>
       <button id="btn-go" class="primary big-btn" disabled><svg class="ico"><use href="#i-zoom"/></svg><span id="go-text">Ampliar</span></button>
     </div>
   </section>

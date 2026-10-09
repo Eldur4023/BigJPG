@@ -35,6 +35,9 @@ fn List<Json> migrations():
             "create index ix_jobs_status on jobs (status, created_at)",
             "create index ix_jobs_created on jobs (created_at)",
             "create table meta (key text primary key, value text not null)"
+        ],
+        [
+            "alter table jobs add column kind text not null default 'upscale'"
         ]
     ]
 

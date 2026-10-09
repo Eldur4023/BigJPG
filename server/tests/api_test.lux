@@ -189,3 +189,34 @@ test "la limpieza quita lo viejo y las carpetas huérfanas":
     test.ok(removed >= 2, "se quitaron " + str(removed))
     test.eq((await get("/api/jobs/" + id))["status"], 404)
     test.ok(not os.is_dir(os.path_join(os.getenv("BIGJPG_DATA_DIR", "."), "jobs", "huerfana")))
+
+fn Json convert_upload(string path, string query):
+    Json r = await os.run("curl", ["-s", "-m", "20", "-w", "\n%{http_code}", "-F", "file=@" + path, "-H", "X-Requested-With: bigjpg", url("/api/convert" + query)], { "timeout_ms": 30000 })
+    List<string> parts = str(r["stdout"]).split("\n")
+    string code = parts[len(parts) - 1]
+    string body = str(r["stdout"]).slice(0, len(str(r["stdout"])) - len(code) - 1)
+    Json parsed = null
+    try:
+        parsed = json.parse(body)
+    catch e:
+        parsed = { "raw": body }
+    return { "status": int(code), "body": parsed }
+
+test "convertir: info, PNG a JPG de verdad y errores":
+    Json info = (await get("/api/info"))["body"]["convert"]
+    test.eq(info["ready"], true)
+    test.eq((await get("/api/convert/targets?ext=wav"))["body"]["kind"], "audio")
+    test.ok((await get("/api/convert/targets?ext=wav"))["body"]["targets"].contains("mp3"))
+    test.eq(len((await get("/api/convert/targets?ext=xyz"))["body"]["targets"]), 0)
+    Json up = await convert_upload(files() + "/small.png", "?fmt=jpg")
+    test.eq(up["status"], 201, str(up["body"]))
+    test.eq(up["body"]["kind"], "convert")
+    Json done = await wait_done(up["body"]["id"])
+    test.eq(done["status"], "done", str(done))
+    Json res = await http.get(url("/api/jobs/" + up["body"]["id"] + "/result"))
+    test.contains(str(res["headers"]["content-disposition"]), "small.jpg")
+    test.eq((await get("/api/jobs/" + up["body"]["id"] + "/thumb"))["status"], 404)
+    # mismo formato, formato de otra clase y archivo desconocido
+    test.eq((await convert_upload(files() + "/small.png", "?fmt=png"))["status"], 400)
+    test.eq((await convert_upload(files() + "/small.png", "?fmt=docx"))["status"], 400)
+    test.eq((await convert_upload(files() + "/notimage.txt", "?fmt=mp3"))["status"], 400)

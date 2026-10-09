@@ -18,13 +18,14 @@ import regex
 import proc
 import image
 import text
+import convert
 import http
 
 app:
     name   "BigJPG"
     # Sólo esta máquina: el runtime de escritorio se niega a arrancar si no.
     host   "127.0.0.1"
-    max_body "60MB"
+    max_body "500MB"
 
     window:
         title     "BigJPG"

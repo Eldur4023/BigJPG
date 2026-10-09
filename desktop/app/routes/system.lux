@@ -15,7 +15,7 @@ post endpoint("/api/jobs/:id/save", string id):
     string base = r["name"]
     int dot = base.index_of(".")
     string stem = dot > 0 ? base.slice(0, dot) : base
-    string dest = await window.save_file(stem + "_x" + str(r["scale"]) + "." + r["fmt"])
+    string dest = await window.save_file(stem + (r["kind"] == "convert" ? "" : "_x" + str(r["scale"])) + "." + r["fmt"])
     if dest == "":
         return { "ok": false, "cancelled": true }
     await os.copy_file(r["out_path"], dest, true)

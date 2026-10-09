@@ -15,6 +15,8 @@ done
 node --check "$ROOT/ui/app.js" && echo "  ok    ui/app.js compila" || status=1
 echo "== Servidor (API, cola, cancelación, limpieza)"
 "$ROOT/server/tests/run.sh" || status=1
+echo "== Módulo convert de Lux (ffmpeg real)"
+"$ROOT/server/tests/convert_module.sh" || status=1
 echo "== Sonda de QuemaOS"
 "$ROOT/server/tests/quemaos.sh" || status=1
 echo "== Escritorio contra un servidor real (local, servidor, errores, cancelación)"

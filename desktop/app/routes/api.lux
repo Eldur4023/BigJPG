@@ -20,6 +20,7 @@ fn Json info_body():
         },
         "models": models(),
         "formats": ["png", "jpg", "webp"],
+        "convert": { "local": await convert_info(), "server": remote["convert"] },
         "limits": { "max_pixels": max_pixels(), "max_queue": max_queue(), "keep_hours": int(os.getenv("BIGJPG_KEEP_HOURS", "72")) },
         "queue": await queue_counts()
     }
@@ -133,6 +134,68 @@ group("/api"):
             id, name, model, scale, fmt, target, remote_id, in_path, out_path, os.file_size(in_path), info["width"], info["height"], info["width"] * scale, info["height"] * scale, time.now())
         return job_view(await get_job(id)).status(201)
 
+    # A qué se puede convertir una extensión, en este equipo o (con target=server) en el servidor.
+    get endpoint("/convert/targets", string ext, string target = "local"):
+        if target == "server":
+            string url = await server_url()
+            if url == "":
+                abort(503, "Falta configurar el servidor (⚙).")
+            Json r = null
+            try:
+                r = await http.get(url + "/api/convert/targets?ext=" + ext, {}, { "timeout_ms": 4000 })
+            catch e:
+                abort(503, "El servidor no responde.")
+            if r["status"] != 200:
+                abort(503, "El servidor no responde.")
+            return r["body"]
+        return { "ext": ext.lower(), "kind": convert.kind(ext), "targets": convert.targets(ext) }
+
+    # Sube un archivo cualquiera (multipart, campo «file») y lo convierte a `fmt`. `kind` es la clase (imagen, audio...).
+    post endpoint("/convert", File file, string fmt = "png", string target = "local"):
+        need_csrf()
+        string fname = text.truncate(os.path_basename(file.filename == null ? "archivo" : str(file.filename)), 120)
+        string from = file_ext(fname)
+        if convert.kind(from) == "":
+            abort(400, "No sé convertir ese tipo de archivo.")
+        if not ["local", "server"].contains(target):
+            abort(400, "target debe ser local o server.")
+        if target == "local" and not convert.can(from, fmt):
+            abort(400, "No se puede convertir ." + from + " a ." + fmt + " en este equipo (¿falta ffmpeg, ImageMagick o pandoc?).")
+        if target == "server":
+            Json st = await remote_state(false)
+            if not st["configured"]:
+                abort(503, "Falta configurar el servidor (⚙).")
+            if not st["ok"]:
+                abort(503, "El servidor no responde: " + str(st["error"]))
+        Json counts = await queue_counts()
+        if counts["queued"] + counts["running"] >= max_queue():
+            abort(429, "Hay demasiados trabajos en cola. Espera a que termine alguno.")
+
+        string id = new_id()
+        string dir = job_dir(id)
+        os.make_dir(jobs_root())
+        os.make_dir(dir)
+        string saved = file.save(dir)
+        string in_path = os.path_join(dir, "in." + file_ext(fname))
+        await os.move(os.path_join(dir, saved), in_path)
+        string out_path = os.path_join(dir, "out." + fmt)
+        Json row = { "id": id, "name": fname, "model": convert.kind(from), "scale": 1, "fmt": fmt, "in_path": in_path, "out_path": out_path, "kind": "convert" }
+        string remote_id = ""
+        if target == "server":
+            Json up = null
+            try:
+                up = await remote_upload(row)
+            catch e:
+                up = { "ok": false, "remote_id": "", "error": "no se pudo subir al servidor: " + e.message }
+            if not up["ok"]:
+                os.remove_dir(dir, true)
+                abort(502, str(up["error"]))
+            remote_id = up["remote_id"]
+        await sqlite.exec(
+            "insert into jobs (id, kind, name, model, scale, fmt, target, remote_id, in_path, out_path, in_bytes, created_at) values (?, 'convert', ?, ?, 1, ?, ?, ?, ?, ?, ?, ?)",
+            id, fname, convert.kind(from), fmt, target, remote_id, in_path, out_path, os.file_size(in_path), time.now())
+        return job_view(await get_job(id)).status(201)
+
     delete endpoint("/jobs/:id", string id):
         need_csrf()
         Json r = await get_job(id)
@@ -154,7 +217,7 @@ group("/api"):
 
     get endpoint("/jobs/:id/thumb", string id):
         Json r = await get_job(id)
-        if r == null or not os.is_file(r["in_path"]):
+        if r == null or r["kind"] == "convert" or not os.is_file(r["in_path"]):
             abort(404, "No existe ese trabajo.")
         string thumb = os.path_join(os.path_dirname(r["in_path"]), "thumb.webp")
         if not os.is_file(thumb):
@@ -168,4 +231,4 @@ group("/api"):
         string base = r["name"]
         int dot = base.index_of(".")
         string stem = dot > 0 ? base.slice(0, dot) : base
-        return send_file(r["out_path"], { "filename": stem + "_x" + str(r["scale"]) + "." + r["fmt"], "inline": inline == 1 }).header("Cache-Control", "private, max-age=3600")
+        return send_file(r["out_path"], { "filename": stem + (r["kind"] == "convert" ? "" : "_x" + str(r["scale"])) + "." + r["fmt"], "inline": inline == 1 }).header("Cache-Control", "private, max-age=3600")

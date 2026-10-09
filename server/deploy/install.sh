@@ -54,7 +54,8 @@ apt-get install -y --no-install-recommends \
     ca-certificates curl unzip openssl \
     libsqlite3-0 libcurl4 libwebp7 libpng16-16 libjpeg-turbo8 libcairo2 \
     libjemalloc2 libpq5 libmysqlclient21 zlib1g libargon2-1 tzdata \
-    libvulkan1 mesa-vulkan-drivers
+    libvulkan1 mesa-vulkan-drivers \
+    ffmpeg imagemagick pandoc      # el conversor de archivos
 
 echo "==> Preparando el usuario de servicio"
 if ! id "$SERVICE_USER" &>/dev/null; then

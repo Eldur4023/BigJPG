@@ -71,7 +71,8 @@ main { max-width:980px; margin:0 auto; padding:22px 24px 64px; display:flex; fle
 .model b { display:block; } .model span { color:var(--muted); font-size:13px; }
 .model.on { border-color:var(--accent); background:var(--accent-soft); }
 .opt-row { display:flex; align-items:flex-end; gap:28px; flex-wrap:wrap; }
-.pills { display:flex; gap:6px; }
+.pills { display:flex; flex-wrap:wrap; gap:6px; }
+.opt-row > div:has(#formats) { flex:1 1 320px; min-width:0; }
 .pill { padding:5px 14px; border-radius:18px; background:var(--surface-2); border:1px solid var(--border); cursor:pointer; font-size:14px; }
 .pill.on { border-color:var(--accent); background:var(--accent-soft); color:var(--accent); }
 .pill:disabled { opacity:.35; }
@@ -115,3 +116,7 @@ dialog menu { display:flex; align-items:center; gap:8px; margin:16px 0 0; paddin
   .models { grid-template-columns:1fr; } .job { grid-template-columns:72px 1fr; } .job .btns { grid-column:1 / -1; }
   .job img { width:72px; height:56px; } .big-btn { margin-left:0; width:100%; }
 }
+.ph { display:grid; place-items:center; width:96px; height:72px; border-radius:var(--radius-sm); background:var(--surface-2); color:var(--accent); font:600 13px/1 monospace; }
+
+.st .ph { width:132px; height:100px; }
+@media (max-width:640px) { .job .ph { width:72px; height:56px; } }

@@ -14,7 +14,7 @@ fn Json csrf():
 fn Json remote_state(bool fresh):
     string url = await server_url()
     if url == "":
-        return { "ok": false, "configured": false, "ready": false, "device": "", "error": "sin configurar" }
+        return { "ok": false, "configured": false, "ready": false, "device": "", "error": "sin configurar", "convert": null }
     Json cached = state.get("remote_state", null)
     if not fresh and cached != null and time.now() - cached["at"] < 15000 and cached["url"] == url:
         return cached["value"]
@@ -22,11 +22,11 @@ fn Json remote_state(bool fresh):
     try:
         Json r = await http.get(url + "/api/info", {}, { "timeout_ms": 4000 })
         if r["status"] == 200 and r["body"] != null and r["body"]["mode"] == "server":
-            value = { "ok": true, "configured": true, "ready": r["body"]["engine"]["ready"] == true, "device": str(r["body"]["engine"]["device"]), "error": r["body"]["engine"]["ready"] == true ? "" : "el servidor no tiene el motor instalado" }
+            value = { "ok": true, "configured": true, "ready": r["body"]["engine"]["ready"] == true, "device": str(r["body"]["engine"]["device"]), "error": r["body"]["engine"]["ready"] == true ? "" : "el servidor no tiene el motor instalado", "convert": r["body"]["convert"] }
         else:
-            value = { "ok": false, "configured": true, "ready": false, "device": "", "error": "eso no parece un servidor de BigJPG (respondió " + str(r["status"]) + ")" }
+            value = { "ok": false, "configured": true, "ready": false, "device": "", "convert": null, "error": "eso no parece un servidor de BigJPG (respondió " + str(r["status"]) + ")" }
     catch e:
-        value = { "ok": false, "configured": true, "ready": false, "device": "", "error": "no responde: " + e.message }
+        value = { "ok": false, "configured": true, "ready": false, "device": "", "convert": null, "error": "no responde: " + e.message }
     state.set("remote_state", { "at": time.now(), "url": url, "value": value })
     return value
 
@@ -37,7 +37,7 @@ fn Json remote_upload(Json job):
     string safe = regex.replace("[^A-Za-z0-9._ -]", job["name"], "_")
     Json r = await os.run("curl", ["-s", "-m", "110", "-w", "\n%{http_code}", "-H", "X-Requested-With: bigjpg",
         "-F", "file=@" + job["in_path"] + ";filename=" + safe,
-        url + "/api/jobs?model=" + job["model"] + "&scale=" + str(job["scale"]) + "&fmt=" + job["fmt"]], { "timeout_ms": 118000 })
+        job["kind"] == "convert" ? url + "/api/convert?fmt=" + job["fmt"] : url + "/api/jobs?model=" + job["model"] + "&scale=" + str(job["scale"]) + "&fmt=" + job["fmt"]], { "timeout_ms": 118000 })
     string out = str(r["stdout"])
     List<string> lines = out.split("\n")
     if r["status"] != 0 or len(lines) < 2:

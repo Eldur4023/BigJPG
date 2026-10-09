@@ -25,13 +25,14 @@ import regex
 import proc
 import image
 import text
+import convert
 
 app:
     name      "BigJPG"
     version   "2.0.0"
     port      env("BIGJPG_PORT", "5002")
     host      env("BIGJPG_HOST", "127.0.0.1")
-    max_body  env("BIGJPG_MAX_BODY", "60MB")
+    max_body  env("BIGJPG_MAX_BODY", "500MB")
 
     headers:
         "X-Content-Type-Options" "nosniff"

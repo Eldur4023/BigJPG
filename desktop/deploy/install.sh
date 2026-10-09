@@ -45,6 +45,10 @@ install -d /opt/bigjpg-desktop
 echo "$REPO" > /opt/bigjpg-desktop/source
 runuser -u "$APP_USER" -- git -C "$REPO" rev-parse HEAD > /opt/bigjpg-desktop/version 2>/dev/null || rm -f /opt/bigjpg-desktop/version
 
+for t in ffmpeg magick pandoc; do
+  command -v "$t" >/dev/null 2>&1 || echo "aviso: falta $t; sin él no se convertirán esos archivos en este equipo (sudo apt install ffmpeg imagemagick pandoc)." >&2
+done
+
 # El motor: Real-ESRGAN (ncnn-Vulkan), para ampliar en este equipo. Usa la GPU por Vulkan.
 echo "==> Real-ESRGAN (el motor)"
 bash "$REPO/engine/install-engine.sh" /opt/bigjpg-desktop/engine

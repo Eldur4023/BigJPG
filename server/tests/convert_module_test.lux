@@ -1,0 +1,32 @@
+import test
+fn Json run(string i, string o, Json opts):
+    Json c = convert.command(i, o, opts)
+    if not c["ok"]:
+        return c
+    Json r = await os.run(c["bin"], c["args"], { "timeout_ms": 60000 })
+    return { "ok": r["status"] == 0 and os.is_file(o), "error": str(r["stderr"]), "tool": c["tool"], "args": c["args"] }
+# Prueba del módulo nativo convert (vendor/lux/src/lux_script/modules/convert.cpp) con ffmpeg de verdad.
+# La lanza server/tests/convert_module.sh, que prepara un wav y un png en T_DIR.
+test "módulo convert: tablas, rutas y conversiones reales":
+    string d = os.getenv("T_DIR", ".")
+    test.ok(len(convert.formats()) > 100)
+    test.eq(convert.kind("MP3"), "audio")
+    test.ok(convert.targets("wav").contains("mp3"))
+    test.ok(convert.targets("wav").contains("mp4"))
+    test.ok(not convert.can("wav", "png"))
+    test.ok(not convert.can("mp3", "mp3"))
+    test.eq(convert.command("a.xyz", "b.mp3", {})["ok"], false)
+    for string to in ["mp3", "flac", "ogg", "opus", "m4a", "alac", "aiff", "wma", "ac3", "mp4", "webm", "mkv", "avi", "amv"]:
+        Json r = await run(d + "/in.wav", d + "/out_" + to + "." + to, { "bitrate": 128 })
+        test.ok(r["ok"], to + ": " + str(r["error"]) + " " + str(r["args"]))
+    Json v = await run(d + "/out_mp4.mp4", d + "/v.mp3", {})
+    test.ok(v["ok"], "video->audio " + str(v["error"]))
+    Json v2 = await run(d + "/out_mp4.mp4", d + "/v.webm", {})
+    test.ok(v2["ok"], "video->webm " + str(v2["error"]))
+    Json v3 = await run(d + "/out_mp4.mp4", d + "/v.gif", {})
+    test.ok(v3["ok"], "video->gif " + str(v3["error"]))
+    Json i = await run(d + "/in.png", d + "/i.jpg", { "quality": 80 })
+    test.ok(i["ok"], "img " + str(i["error"]) + str(i["tool"]))
+    Json i2 = await run(d + "/in.png", d + "/i.webp", {})
+    test.ok(i2["ok"], "img webp " + str(i2["error"]))
+    test.eq(convert.command(d + "/in.png", d + "/x.docx", {})["ok"], false)

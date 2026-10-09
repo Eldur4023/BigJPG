@@ -1,0 +1,44 @@
+# Conversión de archivos. Los formatos, las herramientas y las órdenes (ffmpeg, ImageMagick, pandoc) las pone
+# el módulo `convert` de Lux (las tablas de VERT); aquí sólo se lanza la orden bajo la cola, con cancelación
+# y tiempo límite. Esta librería es IDÉNTICA en server/ y desktop/.
+
+fn string file_ext(string name):
+    List<string> g = regex.groups("\\.([A-Za-z0-9]+)$", name)
+    return g == null ? "" : g[1].lower()
+
+fn Json convert_info():
+    Json t = convert.tools()
+    return {
+        "ready": t["ffmpeg"] != "" or t["magick"] != "" or t["pandoc"] != "",
+        "tools": { "ffmpeg": t["ffmpeg"] != "", "magick": t["magick"] != "", "pandoc": t["pandoc"] != "" }
+    }
+
+# Ejecuta una conversión. Devuelve {"ok", "error"}. Sin porcentaje real (ffmpeg y pandoc no lo dan de forma
+# uniforme): la interfaz muestra una barra indeterminada. ponytail: con ffprobe + -progress se podría medir.
+fn Json run_convert(Json job):
+    Json cmd = convert.command(job["in_path"], job["out_path"], {})
+    if not cmd["ok"]:
+        return { "ok": false, "error": cmd["error"] }
+    string logfile = os.path_join(os.path_dirname(job["in_path"]), "convert.log")
+    int h = proc.start(cmd["bin"], cmd["args"], { "stdout": "null", "stderr": logfile })
+    long deadline = time.now() + 45 * 60 * 1000
+    Json code = null
+    while code == null and time.now() < deadline:
+        code = await proc.wait(h, 700)
+        Json cur = first(await sqlite.query("select status from jobs where id = ?", job["id"]))
+        if cur == null or cur["status"] != "running":
+            break
+    if code == null:
+        proc.kill(h)
+        await proc.wait(h, 3000)
+        proc.close(h)
+        Json cur2 = first(await sqlite.query("select status from jobs where id = ?", job["id"]))
+        if cur2 == null or cur2["status"] != "running":
+            return { "ok": false, "error": "cancelado" }
+        return { "ok": false, "error": "la conversión tardó más de 45 minutos y se detuvo" }
+    proc.close(h)
+    if code != 0 or not os.is_file(job["out_path"]):
+        string log_text = os.is_file(logfile) ? await os.read_file(logfile) : ""
+        string why = text.truncate(log_text.trim().replace("\n", " · "), 300)
+        return { "ok": false, "error": why == "" ? "la conversión terminó con código " + str(code) : why }
+    return { "ok": true, "error": "" }

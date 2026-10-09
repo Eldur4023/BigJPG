@@ -49,6 +49,26 @@ bigjpg-desktop
 
 Instala la ventana, el icono, el lanzador y el motor en `/opt/bigjpg-desktop/engine`. En ⚙ pon la dirección de tu servidor para poder ampliar allí. Necesita `libvulkan1` y un controlador Vulkan (NVIDIA, AMD o Intel; `mesa-vulkan-drivers` incluye uno por software, lento).
 
+## Convertir archivos
+
+Segundo modo de la interfaz (**Convertir**), inspirado en [VERT](https://github.com/VERT-sh/VERT): imágenes, audio, vídeo y documentos, **en este equipo o en el servidor** (el mismo selector de la ampliación).
+
+El trabajo de VERT vive en un **módulo nativo de Lux**, [`convert`](vendor/lux/src/lux_script/modules/convert.cpp): sus listas de formatos (de `magick`, `ffmpeg` y `pandoc`), qué herramienta lleva cada pareja, el códec de cada contenedor y sus ajustes y correcciones por formato (metadatos, bitrate, frecuencia, canales, calidad, tamaño de `.ico`, amv, mpeg, mxf, gxf, divx, alac…). Lo que cambia es el motor: VERT lleva ImageMagick, FFmpeg y Pandoc compilados a WebAssembly en el navegador (Svelte + bun); aquí son los programas nativos del sistema, que los instaladores piden (`ffmpeg imagemagick pandoc`). El módulo no ejecuta nada: `convert.command(entrada, salida, ajustes)` devuelve el binario y los argumentos, y la app los lanza bajo la cola (cancelación, límite de 45 min).
+
+```lux
+import convert
+Json c = convert.command("in.wav", "out.mp3", { "bitrate": 192 })   # {ok, error, tool, bin, args}
+convert.targets("wav")      # a qué puede pasar con lo instalado aquí
+convert.formats() · convert.kind("mp3") · convert.can("wav", "flac") · convert.tools()
+```
+
+```
+GET  /api/convert/targets?ext=wav   a qué formatos puede pasar (el escritorio añade &target=local|server)
+POST /api/convert?fmt=mp3           multipart, campo «file» → 201 con el trabajo (kind: "convert"; el escritorio añade &target=)
+```
+
+Comparte cola, límites, cancelación y limpieza con la ampliación. Sin porcentaje real (barra indeterminada). Cuerpo máximo 500 MB (`BIGJPG_MAX_BODY`); desde el escritorio al servidor, la subida se corta a ~110 s. Diferencias con VERT: sin QOA ni `vertd` (el vídeo lo hace ffmpeg directamente), SVG sólo de entrada, CSV/TSV sólo de entrada (pandoc no los escribe), sin PDF, sin carátula en audio→vídeo y el mono forzado de Opus no se copia.
+
 ## Estado para QuemaOS
 
 `bigjpg-quemaos.service` (app Lux aparte, `127.0.0.1:9702`) responde `GET /quemaos/status` con el contrato de la suite: cola, trabajos de las últimas 24 h, dispositivo, comprobación de que la app y el motor están, disco libre, y `extra.url` (el botón «Abrir»). No toca la base al responder: sirve lo que midió su reloj cada 30 s.

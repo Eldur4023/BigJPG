@@ -25,7 +25,7 @@ fn string ext_of(string image_format):
 
 fn Json job_view(Json r):
     return {
-        "id": r["id"], "name": r["name"], "model": r["model"], "scale": r["scale"], "format": r["fmt"],
+        "id": r["id"], "kind": r["kind"], "name": r["name"], "model": r["model"], "scale": r["scale"], "format": r["fmt"],
         "status": r["status"], "progress": r["progress"], "error": r["error"],
         "in": { "w": r["in_w"], "h": r["in_h"], "bytes": r["in_bytes"] },
         "out": { "w": r["out_w"], "h": r["out_h"], "bytes": r["out_bytes"] },
@@ -51,15 +51,15 @@ fn bool run_next():
     int taken = await sqlite.exec("update jobs set status = 'running', progress = 0, started_at = ? where id = ? and status = 'queued'", time.now(), job["id"])
     if taken == 0:
         return true     # lo ha cancelado alguien entre medias
-    Json res = await run_engine(job)
-    if res["device"] != "":
+    Json res = job["kind"] == "convert" ? await run_convert(job) : await run_engine(job)
+    if res["device"] != null and res["device"] != "":
         await meta_set("device", res["device"])
     Json cur = await get_job(job["id"])
     if cur == null:
         return true     # se borró mientras corría
     long now = time.now()
     if res["ok"]:
-        Json info = await image.info(job["out_path"])
+        Json info = job["kind"] == "convert" ? { "width": 0, "height": 0 } : await image.info(job["out_path"])
         await sqlite.exec("update jobs set status = 'done', progress = 100, out_w = ?, out_h = ?, out_bytes = ?, finished_at = ? where id = ?",
             info["width"], info["height"], os.file_size(job["out_path"]), now, job["id"])
         await meta_set("last_ok", str(now))

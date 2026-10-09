@@ -26,7 +26,7 @@ fn Json upload(string path, string query, bool csrf):
     if csrf:
         args.add("-H")
         args.add("X-Requested-With: bigjpg")
-    args.add(url("/api/jobs" + query))
+    args.add(url(query.starts_with("&fmt") ? "/api/convert?" + query.slice(1) : "/api/jobs" + query))
     Json r = await os.run("curl", args, { "timeout_ms": 40000 })
     string out = str(r["stdout"])
     List<string> parts = out.split("\n")
@@ -179,3 +179,16 @@ test "borrar un trabajo local quita sus ficheros":
 
 test "una ruta de la API que no existe es un 404":
     test.eq((await get("/api/nada"))["status"], 404)
+
+test "convertir: en este equipo y en el servidor":
+    test.eq(await use_server(), true)
+    for string target in ["local", "server"]:
+        Json up = await upload(files() + "/small.png", "&fmt=jpg&target=" + target, true)
+        test.eq(up["status"], 201, target + ": " + str(up["body"]))
+        test.eq(up["body"]["kind"], "convert")
+        Json done = await wait_done(up["body"]["id"])
+        test.eq(done["status"], "done", target + ": " + str(done))
+        Json res = await http.get(url("/api/jobs/" + up["body"]["id"] + "/result"))
+        test.eq(res["status"], 200)
+        test.contains(str(res["headers"]["content-disposition"]), "small.jpg")
+    test.eq((await get("/api/info"))["body"]["convert"]["server"]["ready"], true)
