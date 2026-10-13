@@ -15,9 +15,9 @@ fn bool engine_ready():
 # Los modelos que se ofrecen. `engine` es el nombre del modelo en el motor.
 fn List<Json> models():
     return [
-        { "id": "anime", "name": "Anime e ilustración", "desc": "Líneas limpias y colores planos. El mejor para dibujos.", "engine": "realesrgan-x4plus-anime", "scales": [4] },
-        { "id": "foto", "name": "Fotografía", "desc": "Texturas y detalle de fotos y capturas.", "engine": "realesrgan-x4plus", "scales": [4] },
-        { "id": "rapido", "name": "Anime rápido", "desc": "Más ligero y con ×2, ×3 o ×4. Para fotogramas y capturas de anime.", "engine": "realesr-animevideov3", "scales": [2, 3, 4] }
+        { "id": "anime", "name": "Anime e ilustración", "desc": "Líneas limpias y colores planos. El mejor para dibujos.", "engine": "realesrgan-x4plus-anime", "scales": [2, 3, 4] },
+        { "id": "foto", "name": "Fotografía", "desc": "Texturas y detalle de fotos y capturas.", "engine": "realesrgan-x4plus", "scales": [2, 3, 4] },
+        { "id": "rapido", "name": "Anime rápido", "desc": "Más ligero. Para fotogramas y capturas de anime.", "engine": "realesr-animevideov3", "scales": [2, 3, 4] }
     ]
 
 fn Json find_model(string id):
@@ -60,7 +60,12 @@ fn Json run_engine(Json job):
     Json m = find_model(job["model"])
     if m == null:
         return { "ok": false, "error": "modelo desconocido", "device": "" }
-    List<string> args = ["-i", job["in_path"], "-o", job["out_path"], "-n", m["engine"], "-s", str(job["scale"]),
+    # Los modelos x4plus solo saben ×4: para ×2 y ×3 se amplía ×4 y luego se reduce con ImageMagick.
+    int native = m["engine"] == "realesr-animevideov3" ? job["scale"] : 4
+    string magick = native == job["scale"] ? "" : convert.tools()["magick"]
+    if native != job["scale"] and magick == "":
+        return { "ok": false, "error": "Para ×" + str(job["scale"]) + " con este modelo hace falta ImageMagick", "device": "" }
+    List<string> args = ["-i", job["in_path"], "-o", job["out_path"], "-n", m["engine"], "-s", str(native),
                          "-f", job["fmt"], "-m", os.path_join(engine_dir(), "models")]
     string gpu = os.getenv("BIGJPG_GPU", "auto")
     if gpu != "" and gpu != "auto":
@@ -95,4 +100,10 @@ fn Json run_engine(Json job):
     if code != 0 or not os.is_file(job["out_path"]):
         string why = error_text(log_text)
         return { "ok": false, "error": why == "" ? "el motor terminó con código " + str(code) : why, "device": device }
+    if native != job["scale"]:
+        int rh = proc.start(magick, [job["out_path"], "-resize", str(job["scale"] * 25) + "%", job["out_path"]], { "stdout": "null", "stderr": "null" })
+        Json rc = await proc.wait(rh, 120000)
+        proc.close(rh)
+        if rc != 0:
+            return { "ok": false, "error": "no se pudo reducir a ×" + str(job["scale"]), "device": device }
     return { "ok": true, "error": "", "device": device }

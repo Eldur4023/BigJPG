@@ -101,7 +101,7 @@
     if (S.model !== m.id) S.model = m.id;
     if (!m.scales.includes(S.scale)) S.scale = m.scales[m.scales.length - 1];
     $("models").innerHTML = i.models.map((x) => '<button class="model' + (x.id === S.model ? " on" : "") + '" data-model="' + x.id + '"><b>' + esc(x.name) + "</b><span>" + esc(x.desc) + "</span></button>").join("");
-    $("scales").innerHTML = [2, 3, 4].map((n) => '<button class="pill' + (n === S.scale ? " on" : "") + '" data-scale="' + n + '"' + (m.scales.includes(n) ? "" : " disabled") + ">×" + n + "</button>").join("");
+    $("scales").innerHTML = [2, 3, 4].map((n) => '<button class="pill' + (n === S.scale ? " on" : "") + '" data-scale="' + n + '"' + (m.scales.includes(n) ? "" : ' disabled title="Este modelo solo hace ×' + m.scales.join(", ×") + ' · prueba «Anime rápido»"') + ">×" + n + "</button>").join("");
     $("formats").innerHTML = i.formats.map((f) => '<button class="pill' + (f === S.fmt ? " on" : "") + '" data-fmt="' + f + '">' + f.toUpperCase() + "</button>").join("");
     renderStaged();
   }

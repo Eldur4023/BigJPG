@@ -90,7 +90,8 @@ main { max-width:980px; margin:0 auto; padding:22px 24px 64px; display:flex; fle
 .bar.wait > i { width:30% !important; background:var(--border-strong); animation:slide 1.2s infinite ease-in-out; }
 @keyframes slide { 0%{margin-left:-30%} 100%{margin-left:100%} }
 .job .st-ok { color:var(--ok); } .job .st-err { color:var(--err); }
-.job .btns { display:flex; gap:6px; }
+.job > div { min-width:0; }
+.job .btns { display:flex; gap:6px; flex-wrap:wrap; justify-content:flex-end; }
 
 dialog { color:var(--text); background:var(--surface); border:1px solid var(--border-strong); border-radius:var(--radius); padding:20px 22px; box-shadow:var(--shadow); width:min(520px,calc(100vw - 32px)); }
 dialog.small { width:min(420px,calc(100vw - 32px)); }
