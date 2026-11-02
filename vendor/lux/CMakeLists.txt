@@ -190,6 +190,7 @@ add_library(lux_script STATIC
     ${LUX_MODULE_SOURCES}
 )
 target_include_directories(lux_script PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
+target_include_directories(lux_script PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/third_party/onnxruntime)   # inpaint module: header only, the library is dlopen()ed
 target_link_libraries(lux_script PUBLIC lux ${CMAKE_DL_LIBS})
 
 # Every module registers itself with a namespace-scope object that nothing

@@ -14,7 +14,7 @@ fn Json csrf():
 fn Json remote_state(bool fresh):
     string url = await server_url()
     if url == "":
-        return { "ok": false, "configured": false, "ready": false, "device": "", "error": "sin configurar", "convert": null }
+        return { "ok": false, "configured": false, "ready": false, "device": "", "error": "sin configurar", "convert": null, "inpaint": false }
     Json cached = state.get("remote_state", null)
     if not fresh and cached != null and time.now() - cached["at"] < 15000 and cached["url"] == url:
         return cached["value"]
@@ -22,11 +22,11 @@ fn Json remote_state(bool fresh):
     try:
         Json r = await http.get(url + "/api/info", {}, { "timeout_ms": 4000 })
         if r["status"] == 200 and r["body"] != null and r["body"]["mode"] == "server":
-            value = { "ok": true, "configured": true, "ready": r["body"]["engine"]["ready"] == true, "device": str(r["body"]["engine"]["device"]), "error": r["body"]["engine"]["ready"] == true ? "" : "el servidor no tiene el motor instalado", "convert": r["body"]["convert"] }
+            value = { "ok": true, "configured": true, "ready": r["body"]["engine"]["ready"] == true, "device": str(r["body"]["engine"]["device"]), "error": r["body"]["engine"]["ready"] == true ? "" : "el servidor no tiene el motor instalado", "convert": r["body"]["convert"], "inpaint": r["body"]["inpaint"] == true }
         else:
-            value = { "ok": false, "configured": true, "ready": false, "device": "", "convert": null, "error": "eso no parece un servidor de BigJPG (respondió " + str(r["status"]) + ")" }
+            value = { "ok": false, "configured": true, "ready": false, "device": "", "convert": null, "inpaint": false, "error": "eso no parece un servidor de BigJPG (respondió " + str(r["status"]) + ")" }
     catch e:
-        value = { "ok": false, "configured": true, "ready": false, "device": "", "convert": null, "error": "no responde: " + e.message }
+        value = { "ok": false, "configured": true, "ready": false, "device": "", "convert": null, "inpaint": false, "error": "no responde: " + e.message }
     state.set("remote_state", { "at": time.now(), "url": url, "value": value })
     return value
 
@@ -35,9 +35,26 @@ fn Json remote_upload(Json job):
     string url = await server_url()
     # El nombre que viaja en el multipart: sin comillas, punto y coma ni nada raro.
     string safe = regex.replace("[^A-Za-z0-9._ -]", job["name"], "_")
-    Json r = await os.run("curl", ["-s", "-m", "110", "-w", "\n%{http_code}", "-H", "X-Requested-With: bigjpg",
-        "-F", "file=@" + job["in_path"] + ";filename=" + safe,
-        job["kind"] == "convert" ? url + "/api/convert?fmt=" + job["fmt"] : url + "/api/jobs?model=" + job["model"] + "&scale=" + str(job["scale"]) + "&fmt=" + job["fmt"]], { "timeout_ms": 118000 })
+    List<string> args = ["-s", "-m", "110", "-w", "\n%{http_code}", "-H", "X-Requested-With: bigjpg"]
+    string api_path = ""
+    if job["kind"] == "pdf":
+        for string pg in pdf_pages(os.path_dirname(job["in_path"])):
+            args.add("-F")
+            args.add("files=@" + pg + ";filename=" + regex.replace("[^A-Za-z0-9._ -]", os.path_basename(pg), "_"))
+        api_path = "/api/pdf"
+    else:
+        args.add("-F")
+        args.add("file=@" + job["in_path"] + ";filename=" + safe)
+        if job["kind"] == "inpaint":
+            args.add("-F")
+            args.add("mask=@" + os.path_join(os.path_dirname(job["in_path"]), "mask.png") + ";filename=mask.png")
+            api_path = "/api/inpaint?fmt=" + job["fmt"]
+        else if job["kind"] == "convert":
+            api_path = "/api/convert?fmt=" + job["fmt"]
+        else:
+            api_path = "/api/jobs?model=" + job["model"] + "&scale=" + str(job["scale"]) + "&fmt=" + job["fmt"]
+    args.add(url + api_path)
+    Json r = await os.run("curl", args, { "timeout_ms": 118000 })
     string out = str(r["stdout"])
     List<string> lines = out.split("\n")
     if r["status"] != 0 or len(lines) < 2:

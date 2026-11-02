@@ -13,10 +13,38 @@ fn Json convert_info():
         "tools": { "ffmpeg": t["ffmpeg"] != "", "magick": t["magick"] != "", "pandoc": t["pandoc"] != "" }
     }
 
-# Ejecuta una conversión. Devuelve {"ok", "error"}. Sin porcentaje real (ffmpeg y pandoc no lo dan de forma
+# Las páginas de un trabajo «pdf», en orden: p001.ext, p002.ext...
+fn List<string> pdf_pages(string dir):
+    List<string> names = []
+    for string n in os.list_dir(dir):
+        if regex.test("^p[0-9][0-9][0-9]\\.", n):
+            names.add(n)
+    names.sort()
+    List<string> out = []
+    for string n in names:
+        out.add(os.path_join(dir, n))
+    return out
+
+# Trabajos cuyo resultado no es una imagen que medir ni ampliar.
+fn bool is_file_job(Json job):
+    return job["kind"] == "convert" or job["kind"] == "pdf"
+
+# Ejecuta una conversión (o la unión de imágenes en un PDF, que va por ImageMagick). Devuelve {"ok", "error"}. Sin porcentaje real (ffmpeg y pandoc no lo dan de forma
 # uniforme): la interfaz muestra una barra indeterminada. ponytail: con ffprobe + -progress se podría medir.
 fn Json run_convert(Json job):
-    Json cmd = convert.command(job["in_path"], job["out_path"], {})
+    Json cmd = null
+    if job["kind"] == "pdf":
+        string mg = convert.tools()["magick"]
+        if mg == "":
+            return { "ok": false, "error": "Para crear PDF hace falta ImageMagick" }
+        # 150 ppp: una foto de 4000 px no sale en una página de 1,4 m.
+        List<string> pdf_args = ["-auto-orient", "-units", "PixelsPerInch", "-density", "150"]
+        for string pg in pdf_pages(os.path_dirname(job["in_path"])):
+            pdf_args.add(pg)
+        pdf_args.add(job["out_path"])
+        cmd = { "ok": true, "bin": mg, "args": pdf_args }
+    else:
+        cmd = convert.command(job["in_path"], job["out_path"], {})
     if not cmd["ok"]:
         return { "ok": false, "error": cmd["error"] }
     string logfile = os.path_join(os.path_dirname(job["in_path"]), "convert.log")

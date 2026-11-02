@@ -25,7 +25,8 @@ Parte de una suite de apps personales autoalojadas (junto a Drive, Mail y Calend
 - Los trabajos terminados se conservan unas horas (6 en el servidor, 72 en el escritorio) y se limpian solos.
 - Actualizaciones desde GitHub como en Mail, Drive y Calendar: al abrir, la ventana compara el commit instalado con el de GitHub y ofrece **Actualizar**.
 
-> La versión anterior (Python + PyTorch) tenía además «restaurar»: quitar marcas de agua y objetos con LaMa. **Esta no lo trae**: no hay un runtime de LaMa fuera de Python. El código antiguo sigue en la etiqueta [`python-final`](../../tree/python-final).
+- **Quitar marca**: pintas con un pincel sobre la marca de agua o el objeto y **LaMa** lo rellena. Sin Python: el módulo nativo de Lux [`inpaint`](vendor/lux/src/lux_script/modules/inpaint.cpp) ejecuta el modelo con ONNX Runtime (CPU; carga `libonnxruntime.so` con `dlopen`). Sólo se cambian los píxeles marcados; el resto de la imagen queda intacto. Unos segundos por zona; no se puede cancelar a media inferencia.
+- **Imágenes a PDF**: en **Convertir**, con una o varias imágenes, elige **PDF**: un solo documento, una página por imagen en el orden de la lista (ImageMagick, 150 ppp).
 
 ## Instalar
 
@@ -64,10 +65,12 @@ convert.formats() · convert.kind("mp3") · convert.can("wav", "flac") · conver
 
 ```
 GET  /api/convert/targets?ext=wav   a qué formatos puede pasar (el escritorio añade &target=local|server)
+POST /api/pdf                       multipart, campo «files» (1-100 imágenes) → un PDF (kind: "pdf")
+POST /api/inpaint?fmt=png           multipart, «file» + «mask» (PNG del mismo tamaño; blanco = quitar) → kind: "inpaint"
 POST /api/convert?fmt=mp3           multipart, campo «file» → 201 con el trabajo (kind: "convert"; el escritorio añade &target=)
 ```
 
-Comparte cola, límites, cancelación y limpieza con la ampliación. Sin porcentaje real (barra indeterminada). Cuerpo máximo 500 MB (`BIGJPG_MAX_BODY`); desde el escritorio al servidor, la subida se corta a ~110 s. Diferencias con VERT: sin QOA ni `vertd` (el vídeo lo hace ffmpeg directamente), SVG sólo de entrada, CSV/TSV sólo de entrada (pandoc no los escribe), sin PDF, sin carátula en audio→vídeo y el mono forzado de Opus no se copia.
+Comparte cola, límites, cancelación y limpieza con la ampliación. Sin porcentaje real (barra indeterminada). Cuerpo máximo 500 MB (`BIGJPG_MAX_BODY`); desde el escritorio al servidor, la subida se corta a ~110 s. Diferencias con VERT: sin QOA ni `vertd` (el vídeo lo hace ffmpeg directamente), SVG sólo de entrada, CSV/TSV sólo de entrada (pandoc no los escribe), sin carátula en audio→vídeo y el mono forzado de Opus no se copia.
 
 ## Estado para QuemaOS
 
@@ -98,7 +101,7 @@ Con un motor de pega (`server/tests/fake-engine`, que imita la CLI de Real-ESRGA
 
 ```
 ui/                              la interfaz (HTML + CSS + JS, sin build). tools/sync-ui.sh la copia a las dos apps
-engine/install-engine.sh         trae Real-ESRGAN con versión y hash fijados (lo usan los dos instaladores)
+engine/install-engine.sh         trae Real-ESRGAN, ONNX Runtime y LaMa (208 MB; BIGJPG_SKIP_LAMA=1 lo omite) con versión y hash fijados (lo usan los dos instaladores)
 server/app/                      app Lux: lib/{db,engine,jobs}.lux · routes/api.lux · public/ (copia de ui/)
 server/quemaos/                  la sonda de QuemaOS
 server/deploy/                   install · remote-update (con vuelta atrás) · deploy · units · lanzadores

@@ -32,6 +32,9 @@
   /* ── información y opciones ─────────────────────────────────────────────── */
   function engineFor(target) { const i = S.info; return desktop() ? (i.engines[target] || {}) : i.engine; }
   const converting = () => S.mode === "convert";
+  const restoring = () => S.mode === "restore";
+  // Lo que sabe quitar LaMa en el motor elegido (este equipo, el servidor, o el propio servidor en la web).
+  const inpaintReady = () => { const v = S.info && S.info.inpaint; return !!(desktop() ? v && v[S.target] : v); };
   const ext = (n) => { const m = /\.([A-Za-z0-9]+)$/.exec(n); return m ? m[1].toLowerCase() : ""; };
   // Lo que sabe convertir el motor elegido (este equipo, el servidor, o el propio servidor en la web).
   function convInfo() { const i = S.info; return (desktop() ? (i.convert && i.convert[S.target]) : i.convert) || { ready: false }; }
@@ -39,13 +42,15 @@
   function stagedKind() { return S.staged.length ? S.staged[0].kind : null; }
   // Los formatos a los que pueden pasar TODOS los archivos elegidos (cada uno trae los suyos del motor).
   // Sin alias repetidos (jpeg, jpe, tif...) y con los habituales primero; el resto, por orden alfabético.
-  const ALIAS = ["jpeg", "jpe", "jfif", "tif", "aif", "aifc", "oga"], COMMON = ["png", "jpg", "webp", "gif", "avif", "ico", "mp3", "wav", "flac", "ogg", "opus", "m4a", "mp4", "webm", "mkv", "mov", "docx", "md", "html", "epub", "odt"];
+  const ALIAS = ["jpeg", "jpe", "jfif", "tif", "aif", "aifc", "oga"], COMMON = ["png", "jpg", "webp", "pdf", "gif", "avif", "ico", "mp3", "wav", "flac", "ogg", "opus", "m4a", "mp4", "webm", "mkv", "mov", "docx", "md", "html", "epub", "odt"];
   const rank = (t) => { const i = COMMON.indexOf(t); return i < 0 ? 100 : i; };
   function commonTargets() {
     const all = S.staged.reduce((acc, s) => acc.filter((t) => s.targets.includes(t)), S.staged.length ? S.staged[0].targets : []);
+    // PDF: ImageMagick junta cualquier imagen (una o varias) en un solo documento.
+    if (S.staged.length && S.staged.every((s) => s.kind.id === "image")) all.push("pdf");
     return all.filter((t) => !ALIAS.includes(t)).sort((x, y) => rank(x) - rank(y) || x.localeCompare(y));
   }
-  function engineReady() { return converting() ? convInfo().ready : !!engineFor(S.target).ready; }
+  function engineReady() { return restoring() ? inpaintReady() : converting() ? convInfo().ready : !!engineFor(S.target).ready; }
   function currentModel() { return S.info.models.find((m) => m.id === S.model) || S.info.models[0]; }
 
   async function loadInfo() {
@@ -64,8 +69,8 @@
     const i = S.info, el = $("engine");
     $("where").hidden = !desktop();
     $("btn-settings").hidden = !desktop();
-    $("drop-hint").textContent = converting() ? "Imágenes, audio, vídeo y documentos" : "JPG, PNG o WebP · hasta " + Math.round(i.limits.max_pixels / 1e6) + " megapíxeles";
-    $("btn-pick").parentElement.firstElementChild.textContent = converting() ? "Suelta aquí los archivos" : "Suelta aquí las imágenes";
+    $("drop-hint").textContent = restoring() ? "JPG, PNG o WebP · una imagen cada vez" : converting() ? "Imágenes, audio, vídeo y documentos" : "JPG, PNG o WebP · hasta " + Math.round(i.limits.max_pixels / 1e6) + " megapíxeles";
+    $("btn-pick").parentElement.firstElementChild.textContent = converting() ? "Suelta aquí los archivos" : restoring() ? "Suelta aquí la imagen" : "Suelta aquí las imágenes";
     document.querySelectorAll("#modes button").forEach((b) => b.classList.toggle("on", b.dataset.mode === S.mode));
     let e = engineFor(S.target), txt, ok = engineReady();
     if (desktop()) {
@@ -76,20 +81,22 @@
         b.title = en.ready ? (en.device || "") : (t === "server" ? (en.configured ? "El servidor no responde" : "Falta configurar el servidor (⚙)") : "Real-ESRGAN no está instalado en este equipo");
       });
     }
-    if (converting()) txt = ok ? "Conversor listo" : "Falta ffmpeg, ImageMagick o pandoc";
+    if (restoring()) txt = ok ? "LaMa listo" : "LaMa no está instalado";
+    else if (converting()) txt = ok ? "Conversor listo" : "Falta ffmpeg, ImageMagick o pandoc";
     else if (ok) txt = (e.device ? e.device : "Real-ESRGAN listo");
     else if (desktop() && S.target === "server") txt = i.engines.server.configured ? "El servidor no responde" : "Falta configurar el servidor";
     else txt = "Real-ESRGAN no está instalado";
     el.innerHTML = '<span class="dot ' + (ok ? "on" : "off") + '"></span><span>' + esc(txt) + "</span>";
-    banner(ok ? "" : converting() ? "Aquí no hay herramientas para convertir esto (ffmpeg, ImageMagick o pandoc)." : (desktop() && S.target === "server" ? "No hay conexión con el servidor de BigJPG: configúralo en ⚙ o cambia a «Este equipo»." : "El motor Real-ESRGAN no está disponible aquí: no se pueden ampliar imágenes."), !ok);
+    banner(ok ? "" : restoring() ? (desktop() && S.target === "server" ? "El servidor no tiene LaMa (o no responde): instálalo allí o cambia a «Este equipo»." : "LaMa no está instalado aquí (engine/install-engine.sh): no se pueden quitar marcas.") : converting() ? "Aquí no hay herramientas para convertir esto (ffmpeg, ImageMagick o pandoc)." : (desktop() && S.target === "server" ? "No hay conexión con el servidor de BigJPG: configúralo en ⚙ o cambia a «Este equipo»." : "El motor Real-ESRGAN no está disponible aquí: no se pueden ampliar imágenes."), !ok);
     $("btn-go").disabled = !ok || !S.staged.length;
-    document.querySelectorAll("#where button").forEach((b) => { b.classList.toggle("bad", !(converting() ? (i.convert[b.dataset.target] || {}).ready : (i.engines[b.dataset.target] || {}).ready)); });
+    document.querySelectorAll("#where button").forEach((b) => { b.classList.toggle("bad", !(restoring() ? i.inpaint[b.dataset.target] : converting() ? (i.convert[b.dataset.target] || {}).ready : (i.engines[b.dataset.target] || {}).ready)); });
   }
 
   function renderOptions() {
     const i = S.info;
-    $("model-box").hidden = $("scale-box").hidden = converting();
+    $("model-box").hidden = $("scale-box").hidden = converting() || restoring();
     $("fmt-title").textContent = converting() ? "Convertir a" : "Formato";
+    if (restoring()) { $("formats").innerHTML = i.formats.map((f) => '<button class="pill' + (f === S.fmt ? " on" : "") + '" data-fmt="' + f + '">' + f.toUpperCase() + "</button>").join(""); renderStaged(); return; }
     if (converting()) {
       const k = stagedKind(), to = k ? commonTargets() : [];
       if (!to.includes(S.cfmt)) S.cfmt = to.find((f) => f !== ext(S.staged[0].file.name)) || to[0] || "";
@@ -117,6 +124,7 @@
     for (const f of Array.from(list)) {
       if (converting()) { addConvertible(f); continue; }
       if (!okType.test(f.type)) { toast("No se puede usar", f.name + " no es JPG, PNG ni WebP.", "error"); continue; }
+      if (restoring()) S.staged.splice(0).forEach((x) => x.url && URL.revokeObjectURL(x.url));   // una imagen cada vez
       const item = { file: f, url: URL.createObjectURL(f), w: 0, h: 0, too: false };
       const img = new Image();
       img.onload = () => { item.w = img.naturalWidth; item.h = img.naturalHeight; item.too = !!S.info && item.w * item.h > S.info.limits.max_pixels; renderStaged(); };
@@ -139,10 +147,10 @@
   function renderStaged() {
     $("staging").hidden = !S.staged.length;
     $("staged").innerHTML = S.staged.map((s, i) => '<div class="st">' + (s.url ? '<img src="' + s.url + '" alt="">' : '<div class="ph">' + esc(ext(s.file.name).toUpperCase()) + "</div>") + '<button class="ghost icon" data-rm="' + i + '" title="Quitar"><svg class="ico"><use href="#i-x"/></svg></button>' +
-      '<div class="n" title="' + esc(s.file.name) + '">' + esc(s.file.name) + '</div><div class="d">' + (converting() ? ext(s.file.name).toUpperCase() + " → " + S.cfmt.toUpperCase() : s.w ? s.w + "×" + s.h + " → " + s.w * S.scale + "×" + s.h * S.scale : "…") + (s.too ? " · demasiado grande" : "") + "</div></div>").join("");
+      '<div class="n" title="' + esc(s.file.name) + '">' + esc(s.file.name) + '</div><div class="d">' + (converting() ? ext(s.file.name).toUpperCase() + " → " + S.cfmt.toUpperCase() : restoring() ? (s.w ? s.w + "×" + s.h : "…") : s.w ? s.w + "×" + s.h + " → " + s.w * S.scale + "×" + s.h * S.scale : "…") + (s.too ? " · demasiado grande" : "") + "</div></div>").join("");
     const n = S.staged.filter((s) => !s.too).length;
-    const verb = converting() ? "Convertir" : "Ampliar";
-    $("go-text").textContent = n > 1 ? verb + " " + n + (converting() ? " archivos" : " imágenes") : verb;
+    const verb = converting() ? (S.cfmt === "pdf" && n > 1 ? "Crear PDF de" : "Convertir") : restoring() ? "Marcar y quitar" : "Ampliar";
+    $("go-text").textContent = restoring() ? verb : n > 1 ? verb + " " + n + (converting() ? " archivos" : " imágenes") : verb;
     if (S.info) $("btn-go").disabled = !n || !engineReady();
   }
   $("staged").addEventListener("click", (e) => { const b = e.target.closest("[data-rm]"); if (b) { const [x] = S.staged.splice(+b.dataset.rm, 1); x.url && URL.revokeObjectURL(x.url); renderOptions(); renderChrome(); } });
@@ -162,7 +170,19 @@
   $("btn-go").onclick = async () => {
     const todo = S.staged.filter((s) => !s.too);
     if (!todo.length) return;
+    if (restoring()) { openMask(todo[0]); return; }
     $("btn-go").disabled = true;
+    if (converting() && S.cfmt === "pdf") {
+      // Un solo PDF con todas las imágenes, una página por imagen, en el orden de la lista.
+      const fd = new FormData();
+      todo.forEach((s) => fd.append("files", s.file, s.file.name));
+      const r = await api("POST", "/api/pdf" + (desktop() ? "?target=" + S.target : ""), fd);
+      if (r.ok) { S.staged.splice(0).forEach((x) => x.url && URL.revokeObjectURL(x.url)); }
+      else toast("No se pudo crear el PDF", r.body && r.body.detail, "error");
+      renderOptions(); renderChrome();
+      await loadJobs();
+      return;
+    }
     for (const s of todo) {
       const fd = new FormData();
       fd.append("file", s.file, s.file.name);
@@ -196,16 +216,16 @@
     $("jobs").innerHTML = S.jobs.map((j) => {
       const st = j.status, pct = Math.max(0, Math.min(100, j.progress || 0));
       let state;
-      const cv = j.kind === "convert";
+      const cv = j.kind === "convert" || j.kind === "pdf", fileJob = cv, ip = j.kind === "inpaint";
       if (st === "queued") state = '<div class="bar wait"><i></i></div><div class="meta">En cola</div>';
-      else if (st === "running") state = cv ? '<div class="bar wait"><i></i></div><div class="meta">Convirtiendo…</div>' : '<div class="bar"><i style="width:' + pct + '%"></i></div><div class="meta">' + pct.toFixed(0) + " %</div>";
+      else if (st === "running") state = cv || ip ? '<div class="bar wait"><i></i></div><div class="meta">' + (ip ? "Quitando…" : "Convirtiendo…") + "</div>" : '<div class="bar"><i style="width:' + pct + '%"></i></div><div class="meta">' + pct.toFixed(0) + " %</div>";
       else if (st === "done") state = '<div class="meta"><span class="st-ok">Lista</span> · ' + bytes(j.out.bytes) + "</div>";
       else if (st === "canceled") state = '<div class="meta">Cancelada</div>';
       else state = '<div class="meta st-err">' + esc(j.error || "Falló") + "</div>";
       const where = j.target ? '<span class="tagc">' + (j.target === "server" ? "servidor" : "este equipo") + "</span>" : "";
-      const dims = cv ? esc(ext(j.name).toUpperCase()) + " → " + j.format.toUpperCase() : (j.in.w ? j.in.w + "×" + j.in.h + " → " + j.out.w + "×" + j.out.h : "");
-      return '<div class="job" data-id="' + j.id + '">' + (cv ? '<div class="ph">' + esc(ext(j.name).toUpperCase()) + "</div>" : '<img src="/api/jobs/' + j.id + '/thumb" alt="" onerror="this.style.visibility=\'hidden\'">') + '<div><div class="nm" title="' + esc(j.name) + '">' + esc(j.name) + '</div>' +
-        '<div class="meta"><span>' + dims + '</span>' + (cv ? '<span class="tagc">' + esc(modelName(j.model)) + "</span>" : '<span class="tagc">×' + j.scale + '</span><span class="tagc">' + esc(modelName(j.model)) + '</span><span class="tagc">' + j.format.toUpperCase() + "</span>") + where + "</div>" + state + "</div>" +
+      const dims = j.kind === "pdf" ? j.scale + (j.scale === 1 ? " página" : " páginas") + " → PDF" : cv ? esc(ext(j.name).toUpperCase()) + " → " + j.format.toUpperCase() : ip ? j.in.w + "×" + j.in.h : (j.in.w ? j.in.w + "×" + j.in.h + " → " + j.out.w + "×" + j.out.h : "");
+      return '<div class="job" data-id="' + j.id + '">' + (cv ? '<div class="ph">' + (j.kind === "pdf" ? "PDF" : esc(ext(j.name).toUpperCase())) + "</div>" : '<img src="/api/jobs/' + j.id + '/thumb" alt="" onerror="this.style.visibility=\'hidden\'">') + '<div><div class="nm" title="' + esc(j.name) + '">' + esc(j.name) + '</div>' +
+        '<div class="meta"><span>' + dims + '</span>' + (cv ? '<span class="tagc">' + esc(j.kind === "pdf" ? "PDF" : modelName(j.model)) + "</span>" : ip ? '<span class="tagc">Quitar marca</span><span class="tagc">' + j.format.toUpperCase() + "</span>" : '<span class="tagc">×' + j.scale + '</span><span class="tagc">' + esc(modelName(j.model)) + '</span><span class="tagc">' + j.format.toUpperCase() + "</span>") + where + "</div>" + state + "</div>" +
         '<div class="btns">' + (st === "done" ? (cv ? "" : '<button class="sm" data-act="cmp"><svg class="ico"><use href="#i-compare"/></svg>Comparar</button>') + '<button class="sm primary" data-act="save"><svg class="ico"><use href="#i-down"/></svg>Guardar</button>' : "") +
         '<button class="sm ghost danger" data-act="rm" title="' + (st === "running" || st === "queued" ? "Cancelar" : "Quitar") + '"><svg class="ico"><use href="#i-x"/></svg></button></div></div>';
     }).join("");
@@ -235,7 +255,8 @@
     const j = S.jobs.find((x) => x.id === id); if (!j) return;
     S.cmpId = id;
     $("cmp-title").textContent = j.name;
-    $("cmp-dims").textContent = j.in.w + "×" + j.in.h + " → " + j.out.w + "×" + j.out.h;
+    $("cmp-dims").textContent = j.kind === "inpaint" ? j.in.w + "×" + j.in.h : j.in.w + "×" + j.in.h + " → " + j.out.w + "×" + j.out.h;
+    $("cmp-tag-r").textContent = j.kind === "inpaint" ? "Limpia" : "Ampliada";
     $("cmp-before").src = "/api/jobs/" + id + "/original";
     $("cmp-after").src = "/api/jobs/" + id + "/result?inline=1";
     $("cmp-range").value = 50; setPos(50);
@@ -247,6 +268,57 @@
   $("cmp-close").onclick = () => $("dlg-compare").close();
   $("cmp-save").onclick = () => S.cmpId && saveJob(S.cmpId);
   document.querySelectorAll("dialog").forEach((d) => d.addEventListener("click", (e) => { if (e.target === d) d.close(); }));
+
+  /* ── quitar marca: el editor de la máscara ─────────────────────────────── */
+  // La máscara va a la resolución de la imagen: un PNG en negro con lo que se quita en blanco. Los trazos se
+  // guardan como círculos de radio r (en píxeles de la imagen) unidos por segmentos, para poder deshacer.
+  const M = { item: null, strokes: [], cur: null };
+  function maskPaint(ctx, color) {
+    ctx.lineCap = ctx.lineJoin = "round"; ctx.strokeStyle = ctx.fillStyle = color;
+    for (const st of M.strokes) {
+      ctx.lineWidth = st.r * 2;
+      ctx.beginPath(); ctx.moveTo(st.pts[0][0], st.pts[0][1]);
+      for (const p of st.pts) ctx.lineTo(p[0], p[1]);
+      if (st.pts.length === 1) ctx.lineTo(st.pts[0][0] + 0.01, st.pts[0][1]);
+      ctx.stroke();
+    }
+  }
+  function maskRedraw() { const cv = $("mask-cv"), ctx = cv.getContext("2d"); ctx.clearRect(0, 0, cv.width, cv.height); maskPaint(ctx, "rgba(255,40,40,.55)"); }
+  function openMask(item) {
+    M.item = item; M.strokes = [];
+    $("mask-title").textContent = item.file.name;
+    const img = $("mask-img"), cv = $("mask-cv");
+    img.onload = () => { cv.width = img.naturalWidth; cv.height = img.naturalHeight; maskRedraw(); };
+    img.src = item.url;
+    $("dlg-mask").showModal();
+  }
+  const brushR = () => { const cv = $("mask-cv"); return Math.max(1, +$("mask-size").value / 100 * Math.max(cv.width, cv.height) * 0.08); };
+  function maskPt(e) { const cv = $("mask-cv"), r = cv.getBoundingClientRect(); return [(e.clientX - r.left) * cv.width / r.width, (e.clientY - r.top) * cv.height / r.height]; }
+  $("mask-cv").addEventListener("pointerdown", (e) => { e.preventDefault(); e.target.setPointerCapture(e.pointerId); M.cur = { r: brushR(), pts: [maskPt(e)] }; M.strokes.push(M.cur); maskRedraw(); });
+  $("mask-cv").addEventListener("pointermove", (e) => { if (M.cur) { M.cur.pts.push(maskPt(e)); maskRedraw(); } });
+  ["pointerup", "pointercancel"].forEach((ev) => $("mask-cv").addEventListener(ev, () => { M.cur = null; }));
+  $("mask-undo").onclick = () => { M.strokes.pop(); maskRedraw(); };
+  $("mask-clear").onclick = () => { M.strokes = []; maskRedraw(); };
+  $("mask-close").onclick = () => $("dlg-mask").close();
+  $("mask-go").onclick = async () => {
+    if (!M.strokes.length) { toast("Nada marcado", "Pinta sobre la marca de agua o el objeto que quieres quitar.", "error"); return; }
+    const w = $("mask-cv").width, h = $("mask-cv").height, off = document.createElement("canvas");
+    off.width = w; off.height = h;
+    const ctx = off.getContext("2d"); ctx.fillStyle = "#000"; ctx.fillRect(0, 0, w, h); maskPaint(ctx, "#fff");
+    const blob = await new Promise((res) => off.toBlob(res, "image/png"));
+    const fd = new FormData();
+    fd.append("file", M.item.file, M.item.file.name);
+    fd.append("mask", blob, "mask.png");
+    $("mask-go").disabled = true;
+    const r = await api("POST", "/api/inpaint?fmt=" + S.fmt + (desktop() ? "&target=" + S.target : ""), fd);
+    $("mask-go").disabled = false;
+    if (!r.ok) { toast("No se pudo quitar la marca", r.body && r.body.detail, "error"); return; }
+    $("dlg-mask").close();
+    const i = S.staged.indexOf(M.item); if (i >= 0) S.staged.splice(i, 1);
+    M.item.url && URL.revokeObjectURL(M.item.url);
+    renderOptions(); renderChrome();
+    await loadJobs();
+  };
 
   /* ── servidor (sólo escritorio) ─────────────────────────────────────────── */
   $("btn-settings").onclick = () => { $("server-url").value = (S.info.engines.server.url) || ""; $("settings-msg").hidden = true; $("dlg-settings").showModal(); $("server-url").focus(); };

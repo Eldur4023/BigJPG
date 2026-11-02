@@ -1,0 +1,49 @@
+# Quitar marcas de agua y objetos: LaMa (ONNX) por el módulo nativo `inpaint` de Lux, sin Python. El módulo
+# trabaja con PNM (P6/P5); ImageMagick pasa la imagen y la máscara a ese formato y devuelve el resultado.
+# Esta librería es IDÉNTICA en server/ y desktop/.
+
+fn bool inpaint_ready():
+    return os.is_file(os.path_join(engine_dir(), "lama_fp32.onnx")) and os.is_file(os.path_join(engine_dir(), "libonnxruntime.so")) and convert.tools()["magick"] != ""
+
+fn Json magick_step(string magick, List<string> args):
+    Json r = await os.run(magick, args, { "timeout_ms": 120000 })
+    if r["status"] != 0:
+        return { "ok": false, "error": text.truncate(str(r["stderr"]).trim().replace("\n", " · "), 300) }
+    return { "ok": true, "error": "" }
+
+# Ejecuta una limpieza. Devuelve {"ok", "error", "device"}. LaMa no se puede interrumpir a media inferencia:
+# cancelar sólo descarta el resultado (la cola lo trata igual que con el motor).
+fn Json run_inpaint(Json job):
+    string dir = os.path_dirname(job["in_path"])
+    string magick = convert.tools()["magick"]
+    string ppm = os.path_join(dir, "in.ppm")
+    string pgm = os.path_join(dir, "mask.pgm")
+    string outppm = os.path_join(dir, "out.ppm")
+    if not inpaint_ready():
+        return { "ok": false, "error": "LaMa no está instalado (engine/install-engine.sh)", "device": "" }
+    Json a = await magick_step(magick, [job["in_path"] + "[0]", "-auto-orient", "-background", "white", "-alpha", "remove", "-alpha", "off", "-depth", "8", ppm])
+    if not a["ok"]:
+        return { "ok": false, "error": a["error"], "device": "" }
+    Json b = await magick_step(magick, [os.path_join(dir, "mask.png"), "-background", "black", "-alpha", "remove", "-alpha", "off", "-colorspace", "Gray", "-depth", "8", pgm])
+    if not b["ok"]:
+        return { "ok": false, "error": b["error"], "device": "" }
+    Json r = null
+    try:
+        r = await inpaint.run(os.path_join(engine_dir(), "lama_fp32.onnx"), ppm, pgm, outppm, { "lib": os.path_join(engine_dir(), "libonnxruntime.so") })
+        if r != null and r["error"] != null:
+            return { "ok": false, "error": str(r["error"]), "device": "" }
+    catch e:
+        return { "ok": false, "error": text.truncate(e.message, 300), "device": "" }
+    List<string> enc = [outppm]
+    if job["fmt"] != "png":
+        enc.add("-quality")
+        enc.add("95")
+    enc.add(job["out_path"])
+    Json c = await magick_step(magick, enc)
+    os.remove_file(ppm)
+    os.remove_file(pgm)
+    if os.is_file(outppm):
+        os.remove_file(outppm)
+    if not c["ok"]:
+        return { "ok": false, "error": c["error"], "device": "" }
+    return { "ok": true, "error": "", "device": "" }

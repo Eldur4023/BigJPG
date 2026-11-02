@@ -31,6 +31,12 @@ fn Json job_view(Json r):
         "created_at": r["created_at"], "started_at": r["started_at"], "finished_at": r["finished_at"]
     }
 
+# Lo que se añade al nombre al guardar el resultado: «foto_x4.png», «foto_limpia.png», «documento.pdf».
+fn string result_suffix(Json r):
+    if r["kind"] == "inpaint":
+        return "_limpia"
+    return is_file_job(r) ? "" : "_x" + str(r["scale"])
+
 fn Json get_job(string id):
     return first(await sqlite.query("select * from jobs where id = ?", id))
 
@@ -43,6 +49,15 @@ fn bool remove_job(string id):
 
 # ── cola local ──────────────────────────────────────────────────────────────
 
+# Cada clase de trabajo tiene su ejecutor: ampliar (Real-ESRGAN), convertir y unir en PDF (ffmpeg, ImageMagick,
+# pandoc) o quitar marcas (LaMa).
+fn Json run_job(Json job):
+    if job["kind"] == "inpaint":
+        return await run_inpaint(job)
+    if is_file_job(job):
+        return await run_convert(job)
+    return await run_engine(job)
+
 fn bool run_next():
     Json job = first(await sqlite.query("select * from jobs where status = 'queued' and target = 'local' order by created_at limit 1"))
     if job == null:
@@ -50,7 +65,7 @@ fn bool run_next():
     int taken = await sqlite.exec("update jobs set status = 'running', progress = 0, started_at = ? where id = ? and status = 'queued'", time.now(), job["id"])
     if taken == 0:
         return true
-    Json res = job["kind"] == "convert" ? await run_convert(job) : await run_engine(job)
+    Json res = await run_job(job)
     if res["device"] != null and res["device"] != "":
         await meta_set("device", res["device"])
     Json cur = await get_job(job["id"])
@@ -58,7 +73,7 @@ fn bool run_next():
         return true
     long now = time.now()
     if res["ok"]:
-        Json info = job["kind"] == "convert" ? { "width": 0, "height": 0 } : await image.info(job["out_path"])
+        Json info = is_file_job(job) ? { "width": 0, "height": 0 } : await image.info(job["out_path"])
         await sqlite.exec("update jobs set status = 'done', progress = 100, out_w = ?, out_h = ?, out_bytes = ?, finished_at = ? where id = ?",
             info["width"], info["height"], os.file_size(job["out_path"]), now, job["id"])
     else if cur["status"] == "running":
@@ -106,7 +121,7 @@ fn bool mirror_one(Json job):
     string st = str(b["status"])
     if st == "done":
         if await remote_download(job["remote_id"], job["out_path"]):
-            Json info = job["kind"] == "convert" ? { "width": 0, "height": 0 } : await image.info(job["out_path"])
+            Json info = is_file_job(job) ? { "width": 0, "height": 0 } : await image.info(job["out_path"])
             await sqlite.exec("update jobs set status = 'done', progress = 100, fails = 0, out_w = ?, out_h = ?, out_bytes = ?, finished_at = ? where id = ?",
                 info["width"], info["height"], os.file_size(job["out_path"]), now, job["id"])
             await remote_delete(job["remote_id"])

@@ -19,6 +19,7 @@ fn Json info_body():
         "models": models(),
         "formats": ["png", "jpg", "webp"],
         "convert": await convert_info(),
+        "inpaint": inpaint_ready(),
         "limits": { "max_pixels": max_pixels(), "max_queue": max_queue(), "keep_hours": int(os.getenv("BIGJPG_KEEP_HOURS", "6")) },
         "queue": await queue_counts()
     }
@@ -128,6 +129,86 @@ group("/api"):
             id, fname, convert.kind(from), fmt, in_path, out_path, os.file_size(in_path), time.now())
         return job_view(await get_job(id)).status(201)
 
+    # Une varias imágenes en un PDF (multipart, campo «files», una página por imagen, en ese orden).
+    post endpoint("/pdf", List<File> files):
+        need_csrf()
+        if convert.tools()["magick"] == "":
+            abort(503, "Para crear PDF hace falta ImageMagick en este servidor.")
+        if len(files) == 0 or len(files) > 100:
+            abort(400, "Hay que subir de 1 a 100 imágenes.")
+        Json counts = await queue_counts()
+        if counts["queued"] + counts["running"] >= max_queue():
+            abort(429, "Hay demasiados trabajos en cola. Espera a que termine alguno.")
+        string id = new_id()
+        string dir = job_dir(id)
+        os.make_dir(jobs_root())
+        os.make_dir(dir)
+        int n = 0
+        string first_name = ""
+        for File f in files:
+            string fname = text.truncate(os.path_basename(f.filename == null ? "imagen" : str(f.filename)), 120)
+            string ex = file_ext(fname)
+            if convert.kind(ex) != "image":
+                os.remove_dir(dir, true)
+                abort(400, fname + " no es una imagen.")
+            n = n + 1
+            string saved = f.save(dir)
+            await os.move(os.path_join(dir, saved), os.path_join(dir, "p" + (n < 10 ? "00" + str(n) : n < 100 ? "0" + str(n) : str(n)) + "." + ex))
+            if n == 1:
+                first_name = fname
+        string first_path = pdf_pages(dir)[0]
+        string pname = n == 1 ? first_name : regex.replace("\\.[^.]*$", first_name, "") + " y " + str(n - 1) + " más"
+        string out_path = os.path_join(dir, "out.pdf")
+        await sqlite.exec(
+            "insert into jobs (id, kind, name, model, scale, fmt, in_path, out_path, in_bytes, created_at) values (?, 'pdf', ?, 'image', ?, 'pdf', ?, ?, ?, ?)",
+            id, pname, n, first_path, out_path, os.file_size(first_path), time.now())
+        return job_view(await get_job(id)).status(201)
+
+    # Quita lo marcado en `mask` (PNG del mismo tamaño que la imagen; lo blanco se borra) con LaMa.
+    post endpoint("/inpaint", File file, File mask, string fmt = "png"):
+        need_csrf()
+        if not inpaint_ready():
+            abort(503, "LaMa no está instalado en este servidor.")
+        if not ["png", "jpg", "webp"].contains(fmt):
+            abort(400, "Formato de salida no válido: " + fmt)
+        Json counts = await queue_counts()
+        if counts["queued"] + counts["running"] >= max_queue():
+            abort(429, "Hay demasiados trabajos en cola. Espera a que termine alguno.")
+        string id = new_id()
+        string dir = job_dir(id)
+        os.make_dir(jobs_root())
+        os.make_dir(dir)
+        string tmp = os.path_join(dir, file.save(dir))
+        Json info = null
+        try:
+            info = await image.info(tmp)
+        catch e:
+            info = null
+        if info == null or info["width"] == null or not ["jpeg", "png", "webp"].contains(str(info["format"])):
+            os.remove_dir(dir, true)
+            abort(400, "No es una imagen JPG, PNG o WebP.")
+        if info["width"] * info["height"] > max_pixels():
+            os.remove_dir(dir, true)
+            abort(413, "La imagen tiene más de " + str(int(max_pixels() / 1000000)) + " megapíxeles.")
+        string in_path = os.path_join(dir, "in." + ext_of(str(info["format"])))
+        await os.move(tmp, in_path)
+        string mask_path = os.path_join(dir, "mask.png")
+        await os.move(os.path_join(dir, mask.save(dir)), mask_path)
+        Json minfo = null
+        try:
+            minfo = await image.info(mask_path)
+        catch e:
+            minfo = null
+        if minfo == null or minfo["width"] == null:
+            os.remove_dir(dir, true)
+            abort(400, "La máscara no es una imagen.")
+        string out_path = os.path_join(dir, "out." + fmt)
+        string name = text.truncate(os.path_basename(file.filename == null ? "imagen" : str(file.filename)), 120)
+        await sqlite.exec(
+            "insert into jobs (id, kind, name, model, scale, fmt, in_path, out_path, in_bytes, in_w, in_h, out_w, out_h, created_at) values (?, 'inpaint', ?, 'lama', 1, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            id, name, fmt, in_path, out_path, os.file_size(in_path), info["width"], info["height"], info["width"], info["height"], time.now())
+        return job_view(await get_job(id)).status(201)
+
     # Cancela (si corre) o borra el trabajo.
     delete endpoint("/jobs/:id", string id):
         need_csrf()
@@ -148,7 +229,7 @@ group("/api"):
 
     get endpoint("/jobs/:id/thumb", string id):
         Json r = await get_job(id)
-        if r == null or r["kind"] == "convert" or not os.is_file(r["in_path"]):
+        if r == null or is_file_job(r) or not os.is_file(r["in_path"]):
             abort(404, "No existe ese trabajo.")
         string thumb = os.path_join(os.path_dirname(r["in_path"]), "thumb.webp")
         if not os.is_file(thumb):
@@ -163,5 +244,5 @@ group("/api"):
         string base = r["name"]
         int dot = base.index_of(".")
         string stem = dot > 0 ? base.slice(0, dot) : base
-        string fname = stem + (r["kind"] == "convert" ? "" : "_x" + str(r["scale"])) + "." + r["fmt"]
+        string fname = stem + result_suffix(r) + "." + r["fmt"]
         return send_file(r["out_path"], { "filename": fname, "inline": inline == 1 }).header("Cache-Control", "private, max-age=3600")

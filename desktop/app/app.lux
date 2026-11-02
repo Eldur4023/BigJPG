@@ -19,6 +19,7 @@ import proc
 import image
 import text
 import convert
+import inpaint
 import http
 
 app:

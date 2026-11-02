@@ -161,7 +161,7 @@ test "entradas no válidas":
     test.eq((await upload(files() + "/small.png", "?model=anime&scale=4", false))["status"], 403)
     Json txt = await upload(files() + "/notimage.txt", "?model=anime&scale=4", true)
     test.eq(txt["status"], 400)
-    test.eq((await upload(files() + "/small.png", "?model=anime&scale=2", true))["status"], 400)
+    test.eq((await upload(files() + "/small.png", "?model=anime&scale=5", true))["status"], 400)
     test.eq((await upload(files() + "/small.png", "?model=anime&scale=4&target=otro", true))["status"], 400)
     test.eq((await upload(files() + "/big.png", "?model=anime&scale=4", true))["status"], 413)
     int rows = (await sqlite.query("select count(*) as n from jobs"))[0]["n"]

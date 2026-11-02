@@ -26,6 +26,7 @@ import proc
 import image
 import text
 import convert
+import inpaint
 
 app:
     name      "BigJPG"

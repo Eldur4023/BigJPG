@@ -11,7 +11,7 @@ Estado a 2026-10-08. Cómo se usa y cómo está montado: [README.md](README.md).
 | El **escritorio elige** dónde ampliar (este equipo / servidor), con la misma interfaz que la web (`ui/`, copiada a cada app). | Lo pediste así. Una sola interfaz, dos backends que hablan la misma API. |
 | El escritorio sube al servidor con `curl` y trae el resultado a disco. | El cliente `http` de Lux no hace multipart ni guarda binarios; `curl` está en todas partes. |
 | Paquete del motor **fijado por versión y SHA-256**. | No se ejecuta nada descargado sin comprobar. |
-| Sin LaMa (quitar marcas de agua): **no se porta**. | No existe un runtime de LaMa fuera de Python (haría falta un módulo nativo ONNX). Queda en la etiqueta `python-final`. |
+| Quitar marcas con **LaMa por ONNX Runtime**, en un módulo nativo de Lux (`inpaint`). | Lo pediste así. ORT se carga con `dlopen` (sólo se incluye su cabecera C); el modelo es Carve/LaMa-ONNX (512×512 fijo: se trocea alrededor de la máscara). |
 
 ## Hecho
 
@@ -27,6 +27,5 @@ Estado a 2026-10-08. Cómo se usa y cómo está montado: [README.md](README.md).
 
 ## Futuro
 
-- Restaurar / quitar objetos (LaMa) con un módulo nativo ONNX.
 - Procesar por lotes con una cola persistente en el escritorio aunque se cierre la ventana (un servicio, como en Calendar).
 - Más modelos (`realesrnet-x4plus`, el general `x4v3` con control de ruido).

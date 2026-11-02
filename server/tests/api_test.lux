@@ -101,7 +101,7 @@ test "entradas no válidas":
     test.contains(str(txt["body"]["detail"]), "No es una imagen")
     # modelo, escala y formato
     test.eq((await upload(files() + "/small.png", "?model=inventado&scale=4", true))["status"], 400)
-    test.eq((await upload(files() + "/small.png", "?model=anime&scale=2", true))["status"], 400)
+    test.eq((await upload(files() + "/small.png", "?model=anime&scale=5", true))["status"], 400)
     test.eq((await upload(files() + "/small.png", "?model=anime&scale=4&fmt=gif", true))["status"], 400)
     # demasiados píxeles (el límite de las pruebas son 1000)
     Json big = await upload(files() + "/big.png", "?model=anime&scale=4", true)
@@ -220,3 +220,27 @@ test "convertir: info, PNG a JPG de verdad y errores":
     test.eq((await convert_upload(files() + "/small.png", "?fmt=png"))["status"], 400)
     test.eq((await convert_upload(files() + "/small.png", "?fmt=docx"))["status"], 400)
     test.eq((await convert_upload(files() + "/notimage.txt", "?fmt=mp3"))["status"], 400)
+
+test "PDF: varias imágenes (o una) en un solo documento":
+    Json r = await os.run("curl", ["-s", "-m", "20", "-w", "\n%{http_code}", "-H", "X-Requested-With: bigjpg", "-F", "files=@" + files() + "/small.png", "-F", "files=@" + files() + "/big.png", url("/api/pdf")], { "timeout_ms": 30000 })
+    List<string> parts = str(r["stdout"]).split("\n")
+    test.eq(parts[len(parts) - 1], "201", str(r["stdout"]) + str(r["stderr"]))
+    Json job = json.parse(parts[0])
+    test.eq(job["kind"], "pdf")
+    test.eq(job["scale"], 2)
+    Json done = await wait_done(job["id"])
+    test.eq(done["status"], "done", str(done))
+    Json res = await http.get(url("/api/jobs/" + job["id"] + "/result"))
+    test.contains(str(res["headers"]["content-disposition"]), "small y 1 más.pdf")
+    test.ok(os.file_size(os.path_join(os.getenv("BIGJPG_DATA_DIR", "."), "jobs", job["id"], "out.pdf")) > 100)
+    test.eq((await get("/api/jobs/" + job["id"] + "/thumb"))["status"], 404)
+    # una sola imagen también vale; un archivo que no es imagen, no
+    Json one = await os.run("curl", ["-s", "-m", "20", "-o", "/dev/null", "-w", "%{http_code}", "-H", "X-Requested-With: bigjpg", "-F", "files=@" + files() + "/small.png", url("/api/pdf")], { "timeout_ms": 30000 })
+    test.eq(str(one["stdout"]), "201")
+    Json bad = await os.run("curl", ["-s", "-m", "20", "-o", "/dev/null", "-w", "%{http_code}", "-H", "X-Requested-With: bigjpg", "-F", "files=@" + files() + "/notimage.txt", url("/api/pdf")], { "timeout_ms": 30000 })
+    test.eq(str(bad["stdout"]), "400")
+
+test "quitar marca: sin LaMa instalado responde 503 y /api/info lo dice":
+    test.eq((await get("/api/info"))["body"]["inpaint"], false)
+    Json r = await os.run("curl", ["-s", "-m", "20", "-o", "/dev/null", "-w", "%{http_code}", "-H", "X-Requested-With: bigjpg", "-F", "file=@" + files() + "/small.png", "-F", "mask=@" + files() + "/small.png", url("/api/inpaint")], { "timeout_ms": 30000 })
+    test.eq(str(r["stdout"]), "503")
