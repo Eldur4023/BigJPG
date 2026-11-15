@@ -2,7 +2,7 @@
 (function () {
   "use strict";
   const $ = (id) => document.getElementById(id);
-  const S = { mode: store0("mode", "upscale"), cfmt: "", info: null, jobs: [], staged: [], model: "anime", scale: 4, fmt: "png", target: null, cmpId: null, timer: null, last: "" };
+  const S = { mode: store0("mode", "upscale"), cfmt: "", info: null, jobs: [], staged: [], model: "anime", scale: 4, fmt: "png", target: null, cmpId: null, timer: null, last: "", vmode: store0("vmode", "fast") };
   function store0(k, d) { try { const v = localStorage.getItem("bigjpg." + k); return v === null ? d : JSON.parse(v); } catch (e) { return d; } }
   const store = {
     get(k, d) { try { const v = localStorage.getItem("bigjpg." + k); return v === null ? d : JSON.parse(v); } catch (e) { return d; } },
@@ -69,8 +69,8 @@
     const i = S.info, el = $("engine");
     $("where").hidden = !desktop();
     $("btn-settings").hidden = !desktop();
-    $("drop-hint").textContent = restoring() ? "JPG, PNG o WebP · una imagen cada vez" : converting() ? "Imágenes, audio, vídeo y documentos" : "JPG, PNG o WebP · hasta " + Math.round(i.limits.max_pixels / 1e6) + " megapíxeles";
-    $("btn-pick").parentElement.firstElementChild.textContent = converting() ? "Suelta aquí los archivos" : restoring() ? "Suelta aquí la imagen" : "Suelta aquí las imágenes";
+    $("drop-hint").textContent = restoring() ? "JPG, PNG, WebP o un vídeo · uno cada vez" : converting() ? "Imágenes, audio, vídeo y documentos" : "JPG, PNG o WebP · hasta " + Math.round(i.limits.max_pixels / 1e6) + " megapíxeles";
+    $("btn-pick").parentElement.firstElementChild.textContent = converting() ? "Suelta aquí los archivos" : restoring() ? "Suelta aquí la imagen o el vídeo" : "Suelta aquí las imágenes";
     document.querySelectorAll("#modes button").forEach((b) => b.classList.toggle("on", b.dataset.mode === S.mode));
     let e = engineFor(S.target), txt, ok = engineReady();
     if (desktop()) {
@@ -123,9 +123,19 @@
     const okType = /^image\/(jpeg|png|webp)$/;
     for (const f of Array.from(list)) {
       if (converting()) { addConvertible(f); continue; }
-      if (!okType.test(f.type)) { toast("No se puede usar", f.name + " no es JPG, PNG ni WebP.", "error"); continue; }
-      if (restoring()) S.staged.splice(0).forEach((x) => x.url && URL.revokeObjectURL(x.url));   // una imagen cada vez
-      const item = { file: f, url: URL.createObjectURL(f), w: 0, h: 0, too: false };
+      const isVid = restoring() && (f.type.startsWith("video/") || /^(mp4|m4v|mov|webm|mkv|avi)$/.test(ext(f.name)));
+      if (!isVid && !okType.test(f.type)) { toast("No se puede usar", f.name + (restoring() ? " no es JPG, PNG, WebP ni un vídeo." : " no es JPG, PNG ni WebP."), "error"); continue; }
+      if (restoring()) S.staged.splice(0).forEach((x) => x.url && URL.revokeObjectURL(x.url));   // uno cada vez
+      const item = { file: f, url: URL.createObjectURL(f), w: 0, h: 0, too: false, video: isVid };
+      if (isVid) {
+        const v = document.createElement("video");
+        v.preload = "metadata";
+        v.onloadedmetadata = () => { item.w = v.videoWidth; item.h = v.videoHeight; renderStaged(); };
+        v.onerror = () => { const i = S.staged.indexOf(item); if (i >= 0) S.staged.splice(i, 1); renderStaged(); toast("No se puede usar", f.name + ": este navegador no sabe leer ese vídeo (prueba MP4/H.264 o WebM).", "error"); };
+        v.src = item.url;
+        S.staged.push(item);
+        continue;
+      }
       const img = new Image();
       img.onload = () => { item.w = img.naturalWidth; item.h = img.naturalHeight; item.too = !!S.info && item.w * item.h > S.info.limits.max_pixels; renderStaged(); };
       img.src = item.url;
@@ -146,7 +156,7 @@
   }
   function renderStaged() {
     $("staging").hidden = !S.staged.length;
-    $("staged").innerHTML = S.staged.map((s, i) => '<div class="st">' + (s.url ? '<img src="' + s.url + '" alt="">' : '<div class="ph">' + esc(ext(s.file.name).toUpperCase()) + "</div>") + '<button class="ghost icon" data-rm="' + i + '" title="Quitar"><svg class="ico"><use href="#i-x"/></svg></button>' +
+    $("staged").innerHTML = S.staged.map((s, i) => '<div class="st">' + (s.url && !s.video ? '<img src="' + s.url + '" alt="">' : '<div class="ph">' + (s.video ? "VÍDEO" : esc(ext(s.file.name).toUpperCase())) + "</div>") + '<button class="ghost icon" data-rm="' + i + '" title="Quitar"><svg class="ico"><use href="#i-x"/></svg></button>' +
       '<div class="n" title="' + esc(s.file.name) + '">' + esc(s.file.name) + '</div><div class="d">' + (converting() ? ext(s.file.name).toUpperCase() + " → " + S.cfmt.toUpperCase() : restoring() ? (s.w ? s.w + "×" + s.h : "…") : s.w ? s.w + "×" + s.h + " → " + s.w * S.scale + "×" + s.h * S.scale : "…") + (s.too ? " · demasiado grande" : "") + "</div></div>").join("");
     const n = S.staged.filter((s) => !s.too).length;
     const verb = converting() ? (S.cfmt === "pdf" && n > 1 ? "Crear PDF de" : "Convertir") : restoring() ? "Marcar y quitar" : "Ampliar";
@@ -216,17 +226,17 @@
     $("jobs").innerHTML = S.jobs.map((j) => {
       const st = j.status, pct = Math.max(0, Math.min(100, j.progress || 0));
       let state;
-      const cv = j.kind === "convert" || j.kind === "pdf", fileJob = cv, ip = j.kind === "inpaint";
+      const cv = j.kind === "convert" || j.kind === "pdf", fileJob = cv, ip = j.kind === "inpaint", vid = ip && j.format === "mp4";
       if (st === "queued") state = '<div class="bar wait"><i></i></div><div class="meta">En cola</div>';
-      else if (st === "running") state = cv || ip ? '<div class="bar wait"><i></i></div><div class="meta">' + (ip ? "Quitando…" : "Convirtiendo…") + "</div>" : '<div class="bar"><i style="width:' + pct + '%"></i></div><div class="meta">' + pct.toFixed(0) + " %</div>";
+      else if (st === "running") state = (cv || ip) && !vid ? '<div class="bar wait"><i></i></div><div class="meta">' + (ip ? "Quitando…" : "Convirtiendo…") + "</div>" : '<div class="bar"><i style="width:' + pct + '%"></i></div><div class="meta">' + pct.toFixed(0) + " %</div>";
       else if (st === "done") state = '<div class="meta"><span class="st-ok">Lista</span> · ' + bytes(j.out.bytes) + "</div>";
       else if (st === "canceled") state = '<div class="meta">Cancelada</div>';
       else state = '<div class="meta st-err">' + esc(j.error || "Falló") + "</div>";
       const where = j.target ? '<span class="tagc">' + (j.target === "server" ? "servidor" : "este equipo") + "</span>" : "";
       const dims = j.kind === "pdf" ? j.scale + (j.scale === 1 ? " página" : " páginas") + " → PDF" : cv ? esc(ext(j.name).toUpperCase()) + " → " + j.format.toUpperCase() : ip ? j.in.w + "×" + j.in.h : (j.in.w ? j.in.w + "×" + j.in.h + " → " + j.out.w + "×" + j.out.h : "");
-      return '<div class="job" data-id="' + j.id + '">' + (cv ? '<div class="ph">' + (j.kind === "pdf" ? "PDF" : esc(ext(j.name).toUpperCase())) + "</div>" : '<img src="/api/jobs/' + j.id + '/thumb" alt="" onerror="this.style.visibility=\'hidden\'">') + '<div><div class="nm" title="' + esc(j.name) + '">' + esc(j.name) + '</div>' +
-        '<div class="meta"><span>' + dims + '</span>' + (cv ? '<span class="tagc">' + esc(j.kind === "pdf" ? "PDF" : modelName(j.model)) + "</span>" : ip ? '<span class="tagc">Quitar marca</span><span class="tagc">' + j.format.toUpperCase() + "</span>" : '<span class="tagc">×' + j.scale + '</span><span class="tagc">' + esc(modelName(j.model)) + '</span><span class="tagc">' + j.format.toUpperCase() + "</span>") + where + "</div>" + state + "</div>" +
-        '<div class="btns">' + (st === "done" ? (cv ? "" : '<button class="sm" data-act="cmp"><svg class="ico"><use href="#i-compare"/></svg>Comparar</button>') + '<button class="sm primary" data-act="save"><svg class="ico"><use href="#i-down"/></svg>Guardar</button>' : "") +
+      return '<div class="job" data-id="' + j.id + '">' + (cv || vid ? '<div class="ph">' + (vid ? "VÍDEO" : j.kind === "pdf" ? "PDF" : esc(ext(j.name).toUpperCase())) + "</div>" : '<img src="/api/jobs/' + j.id + '/thumb" alt="" onerror="this.style.visibility=\'hidden\'">') + '<div><div class="nm" title="' + esc(j.name) + '">' + esc(j.name) + '</div>' +
+        '<div class="meta"><span>' + dims + '</span>' + (cv ? '<span class="tagc">' + esc(j.kind === "pdf" ? "PDF" : modelName(j.model)) + "</span>" : ip ? '<span class="tagc">Quitar marca</span><span class="tagc">' + (vid ? "Vídeo" : j.format.toUpperCase()) + "</span>" : '<span class="tagc">×' + j.scale + '</span><span class="tagc">' + esc(modelName(j.model)) + '</span><span class="tagc">' + j.format.toUpperCase() + "</span>") + where + "</div>" + state + "</div>" +
+        '<div class="btns">' + (st === "done" ? (vid ? '<button class="sm" data-act="play">Ver</button>' : cv ? "" : '<button class="sm" data-act="cmp"><svg class="ico"><use href="#i-compare"/></svg>Comparar</button>') + '<button class="sm primary" data-act="save"><svg class="ico"><use href="#i-down"/></svg>Guardar</button>' : "") +
         '<button class="sm ghost danger" data-act="rm" title="' + (st === "running" || st === "queued" ? "Cancelar" : "Quitar") + '"><svg class="ico"><use href="#i-x"/></svg></button></div></div>';
     }).join("");
   }
@@ -236,6 +246,7 @@
     const b = e.target.closest("[data-act]"); if (!b) return;
     const id = b.closest(".job").dataset.id, act = b.dataset.act;
     if (act === "cmp") openCompare(id);
+    else if (act === "play") openPlay(id);
     else if (act === "save") saveJob(id);
     else if (act === "rm") { await api("DELETE", "/api/jobs/" + id); loadJobs(); }
   });
@@ -249,6 +260,18 @@
       const a = document.createElement("a"); a.href = "/api/jobs/" + id + "/result"; a.download = ""; document.body.appendChild(a); a.click(); a.remove();
     }
   }
+
+  /* ── ver un vídeo ya limpio ─────────────────────────────────────────────── */
+  function openPlay(id) {
+    const j = S.jobs.find((x) => x.id === id); if (!j) return;
+    S.cmpId = id;
+    $("vid-title").textContent = j.name;
+    $("vid-play").src = "/api/jobs/" + id + "/result?inline=1";
+    $("dlg-video").showModal();
+  }
+  $("vid-save").onclick = () => S.cmpId && saveJob(S.cmpId);
+  $("vid-close").onclick = () => $("dlg-video").close();
+  $("dlg-video").addEventListener("close", () => { const v = $("vid-play"); v.pause(); v.removeAttribute("src"); v.load(); });
 
   /* ── comparador ─────────────────────────────────────────────────────────── */
   function openCompare(id) {
@@ -272,7 +295,7 @@
   /* ── quitar marca: el editor de la máscara ─────────────────────────────── */
   // La máscara va a la resolución de la imagen: un PNG en negro con lo que se quita en blanco. Los trazos se
   // guardan como círculos de radio r (en píxeles de la imagen) unidos por segmentos, para poder deshacer.
-  const M = { item: null, strokes: [], cur: null };
+  const M = { item: null, strokes: [], cur: null, t: 0, frameUrl: null };
   function maskPaint(ctx, color) {
     ctx.lineCap = ctx.lineJoin = "round"; ctx.strokeStyle = ctx.fillStyle = color;
     for (const st of M.strokes) {
@@ -284,14 +307,53 @@
     }
   }
   function maskRedraw() { const cv = $("mask-cv"), ctx = cv.getContext("2d"); ctx.clearRect(0, 0, cv.width, cv.height); maskPaint(ctx, "rgba(255,40,40,.55)"); }
+  // Una imagen se pinta directamente. Un vídeo tiene un paso antes: buscar un fotograma donde se vea la marca
+  // (se guarda su instante, M.t) y pintar sobre una copia suya; el servidor la sigue por el resto del vídeo.
+  function maskStep(step) {
+    const v = !!M.item.video;
+    $("mask-vid").hidden = !(v && step === "pick");
+    $("mask-wrap").hidden = v && step === "pick";
+    $("mask-pickbar").hidden = !(v && step === "pick");
+    $("mask-tools").hidden = v && step === "pick";
+    $("vmode").hidden = $("mask-back").hidden = !v;
+    $("mask-hint").textContent = v ? (step === "pick" ? "Busca un fotograma donde se vea la marca" : "Pinta encima de la marca; se la sigue en todo el vídeo") : "Pinta encima de lo que quieres quitar";
+    document.querySelectorAll("#vmode button").forEach((b) => b.classList.toggle("on", b.dataset.vmode === S.vmode));
+  }
   function openMask(item) {
-    M.item = item; M.strokes = [];
+    M.item = item; M.strokes = []; M.t = 0;
     $("mask-title").textContent = item.file.name;
-    const img = $("mask-img"), cv = $("mask-cv");
-    img.onload = () => { cv.width = img.naturalWidth; cv.height = img.naturalHeight; maskRedraw(); };
-    img.src = item.url;
+    if (item.video) {
+      const vid = $("mask-vid");
+      vid.onerror = () => { $("dlg-mask").close(); toast("No se puede abrir", "Este navegador no sabe reproducir ese vídeo (prueba MP4/H.264 o WebM).", "error"); };
+      vid.src = item.url;
+      maskStep("pick");
+    } else {
+      const img = $("mask-img"), cv = $("mask-cv");
+      img.onload = () => { cv.width = img.naturalWidth; cv.height = img.naturalHeight; maskRedraw(); };
+      img.src = item.url;
+      maskStep("paint");
+    }
     $("dlg-mask").showModal();
   }
+  $("mask-pick").onclick = () => {
+    const vid = $("mask-vid");
+    if (!vid.videoWidth) { toast("Espera", "El vídeo aún no ha cargado.", "error"); return; }
+    vid.pause();
+    const c = document.createElement("canvas"); c.width = vid.videoWidth; c.height = vid.videoHeight;
+    c.getContext("2d").drawImage(vid, 0, 0);
+    M.t = vid.currentTime; M.strokes = [];
+    c.toBlob((b) => {
+      M.frameUrl && URL.revokeObjectURL(M.frameUrl);
+      M.frameUrl = URL.createObjectURL(b);
+      const img = $("mask-img"), cv = $("mask-cv");
+      img.onload = () => { cv.width = img.naturalWidth; cv.height = img.naturalHeight; maskRedraw(); };
+      img.src = M.frameUrl;
+      maskStep("paint");
+    }, "image/png");
+  };
+  $("mask-back").onclick = () => maskStep("pick");
+  $("vmode").addEventListener("click", (e) => { const b = e.target.closest("[data-vmode]"); if (b) { S.vmode = b.dataset.vmode; store.set("vmode", S.vmode); maskStep("paint"); } });
+  $("dlg-mask").addEventListener("close", () => { const v = $("mask-vid"); v.pause(); v.removeAttribute("src"); v.load(); });
   const brushR = () => { const cv = $("mask-cv"); return Math.max(1, +$("mask-size").value / 100 * Math.max(cv.width, cv.height) * 0.08); };
   function maskPt(e) { const cv = $("mask-cv"), r = cv.getBoundingClientRect(); return [(e.clientX - r.left) * cv.width / r.width, (e.clientY - r.top) * cv.height / r.height]; }
   $("mask-cv").addEventListener("pointerdown", (e) => { e.preventDefault(); e.target.setPointerCapture(e.pointerId); M.cur = { r: brushR(), pts: [maskPt(e)] }; M.strokes.push(M.cur); maskRedraw(); });
@@ -310,7 +372,8 @@
     fd.append("file", M.item.file, M.item.file.name);
     fd.append("mask", blob, "mask.png");
     $("mask-go").disabled = true;
-    const r = await api("POST", "/api/inpaint?fmt=" + S.fmt + (desktop() ? "&target=" + S.target : ""), fd);
+    const tg = desktop() ? "&target=" + S.target : "";
+    const r = await api("POST", M.item.video ? "/api/inpaint/video?mode=" + S.vmode + "&t=" + M.t.toFixed(3) + tg : "/api/inpaint?fmt=" + S.fmt + tg, fd);
     $("mask-go").disabled = false;
     if (!r.ok) { toast("No se pudo quitar la marca", r.body && r.body.detail, "error"); return; }
     $("dlg-mask").close();

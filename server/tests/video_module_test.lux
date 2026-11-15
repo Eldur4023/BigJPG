@@ -1,0 +1,26 @@
+import test
+# Prueba del módulo nativo inpaint.video (vendor/lux/src/lux_script/modules/inpaint.cpp). La lanza video_module.sh,
+# que prepara en T_DIR el vídeo con el logo (wm.mp4) y la máscara del primer fotograma (mask.pgm).
+test "inpaint.video: sigue un logo que se mueve y lo quita (modo rápido)":
+    string d = os.getenv("T_DIR", ".")
+    Json r = await inpaint.video("no-hace-falta.onnx", d + "/wm.mp4", d + "/mask.pgm", d + "/out.mp4", { "mode": "fast", "t": 0, "progress": d + "/progress" })
+    test.eq(r["frames"], 75)
+    test.eq(r["width"], 640)
+    test.ok(r["followed"] > 60, "siguió el logo en " + str(r["followed"]) + " fotogramas")
+    test.eq((await os.read_file(d + "/progress")).trim(), "100")
+
+test "inpaint.video: errores claros":
+    string d = os.getenv("T_DIR", ".")
+    string why = ""
+    try:
+        await inpaint.video("x.onnx", d + "/wm.mp4", d + "/no-existe.pgm", d + "/o.mp4", { "mode": "fast" })
+    catch e:
+        why = e.message
+    test.ok(why.contains("cannot open"), why)
+    await os.write_file(d + "/cancel", "1")
+    why = ""
+    try:
+        await inpaint.video("x.onnx", d + "/wm.mp4", d + "/mask.pgm", d + "/o.mp4", { "mode": "fast", "cancel": d + "/cancel" })
+    catch e:
+        why = e.message
+    test.ok(why.contains("cancelled"), why)

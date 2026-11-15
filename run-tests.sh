@@ -17,6 +17,8 @@ echo "== Servidor (API, cola, cancelación, limpieza)"
 "$ROOT/server/tests/run.sh" || status=1
 echo "== Módulo convert de Lux (ffmpeg real)"
 "$ROOT/server/tests/convert_module.sh" || status=1
+echo "== Módulo inpaint.video de Lux (ffmpeg real, logo en movimiento)"
+"$ROOT/server/tests/video_module.sh" || status=1
 echo "== Sonda de QuemaOS"
 "$ROOT/server/tests/quemaos.sh" || status=1
 echo "== Escritorio contra un servidor real (local, servidor, errores, cancelación)"

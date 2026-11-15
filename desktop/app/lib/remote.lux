@@ -30,12 +30,31 @@ fn Json remote_state(bool fresh):
     state.set("remote_state", { "at": time.now(), "url": url, "value": value })
     return value
 
+# Como os.run, pero sin su tope de 2 minutos (proc.wait espera de 30 s en 30 s): subir o bajar un vídeo tarda más.
+fn Json run_long(string bin, List<string> args, int seconds):
+    string out_file = os.temp_file()
+    int h = proc.start(bin, args, { "stdout": out_file, "stderr": "null" })
+    Json code = null
+    long deadline = time.now() + seconds * 1000
+    while code == null and time.now() < deadline:
+        code = await proc.wait(h, 30000)
+    if code == null:
+        proc.kill(h)
+        await proc.wait(h, 3000)
+    proc.close(h)
+    string out = os.is_file(out_file) ? await os.read_file(out_file) : ""
+    if os.is_file(out_file):
+        os.remove_file(out_file)
+    return { "status": code == null ? -1 : code, "stdout": out, "stderr": code == null ? "se agotó el tiempo" : "" }
+
 # Sube un trabajo al servidor. Devuelve {"ok", "remote_id", "error"}.
 fn Json remote_upload(Json job):
     string url = await server_url()
     # El nombre que viaja en el multipart: sin comillas, punto y coma ni nada raro.
     string safe = regex.replace("[^A-Za-z0-9._ -]", job["name"], "_")
-    List<string> args = ["-s", "-m", "110", "-w", "\n%{http_code}", "-H", "X-Requested-With: bigjpg"]
+    # Un vídeo pesa: se le da más tiempo que a una imagen.
+    bool video = job["kind"] == "inpaint" and job["fmt"] == "mp4"
+    List<string> args = ["-s", "-m", video ? "900" : "110", "-w", "\n%{http_code}", "-H", "X-Requested-With: bigjpg"]
     string api_path = ""
     if job["kind"] == "pdf":
         for string pg in pdf_pages(os.path_dirname(job["in_path"])):
@@ -48,13 +67,17 @@ fn Json remote_upload(Json job):
         if job["kind"] == "inpaint":
             args.add("-F")
             args.add("mask=@" + os.path_join(os.path_dirname(job["in_path"]), "mask.png") + ";filename=mask.png")
-            api_path = "/api/inpaint?fmt=" + job["fmt"]
+            if job["fmt"] == "mp4":
+                Json o = json.parse(job["opts"])
+                api_path = "/api/inpaint/video?mode=" + str(o["mode"]) + "&t=" + str(o["t"])
+            else:
+                api_path = "/api/inpaint?fmt=" + job["fmt"]
         else if job["kind"] == "convert":
             api_path = "/api/convert?fmt=" + job["fmt"]
         else:
             api_path = "/api/jobs?model=" + job["model"] + "&scale=" + str(job["scale"]) + "&fmt=" + job["fmt"]
     args.add(url + api_path)
-    Json r = await os.run("curl", args, { "timeout_ms": 118000 })
+    Json r = await run_long("curl", args, video ? 910 : 118)
     string out = str(r["stdout"])
     List<string> lines = out.split("\n")
     if r["status"] != 0 or len(lines) < 2:
@@ -74,7 +97,7 @@ fn Json remote_upload(Json job):
 # Trae el resultado ya terminado del servidor a `dest`.
 fn bool remote_download(string remote_id, string dest):
     string url = await server_url()
-    Json r = await os.run("curl", ["-sf", "-m", "110", "-o", dest, url + "/api/jobs/" + remote_id + "/result"], { "timeout_ms": 118000 })
+    Json r = await run_long("curl", ["-sf", "-m", "900", "-o", dest, url + "/api/jobs/" + remote_id + "/result"], 910)
     return r["status"] == 0 and os.is_file(dest)
 
 fn bool remote_delete(string remote_id):

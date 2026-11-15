@@ -85,14 +85,28 @@
 </dialog>
 
 <dialog id="dlg-mask" class="wide">
-  <div class="cmp-head"><b id="mask-title"></b><span class="muted">Pinta encima de lo que quieres quitar</span>
+  <div class="cmp-head"><b id="mask-title"></b><span id="mask-hint" class="muted">Pinta encima de lo que quieres quitar</span>
     <span class="spacer"></span>
-    <label class="brush">Pincel <input id="mask-size" type="range" min="1" max="100" value="30"></label>
-    <button id="mask-undo" class="ghost icon" title="Deshacer"><svg class="ico"><use href="#i-undo"/></svg></button>
-    <button id="mask-clear" class="ghost">Borrar todo</button>
-    <button id="mask-go" class="primary"><svg class="ico"><use href="#i-brush"/></svg>Quitar</button>
+    <span id="mask-pickbar" class="dc" hidden>
+      <button id="mask-pick" class="primary"><svg class="ico"><use href="#i-brush"/></svg>Marcar este fotograma</button></span>
+    <span id="mask-tools" class="dc">
+      <label class="brush">Pincel <input id="mask-size" type="range" min="1" max="100" value="30"></label>
+      <button id="mask-undo" class="ghost icon" title="Deshacer"><svg class="ico"><use href="#i-undo"/></svg></button>
+      <button id="mask-clear" class="ghost">Borrar todo</button>
+      <span id="vmode" class="seg" hidden title="Rápida: relleno sin IA, casi en tiempo real. Lenta: LaMa en cada fotograma, mejor resultado pero tarda mucho más.">
+        <button data-vmode="fast">Rápida</button><button data-vmode="slow">Lenta</button></span>
+      <button id="mask-back" class="ghost" hidden>Otro fotograma</button>
+      <button id="mask-go" class="primary"><svg class="ico"><use href="#i-brush"/></svg>Quitar</button></span>
     <button id="mask-close" class="ghost icon" title="Cerrar"><svg class="ico"><use href="#i-x"/></svg></button></div>
+  <video id="mask-vid" class="maskvid" controls muted playsinline hidden></video>
   <div id="mask-wrap" class="maskwrap"><img id="mask-img" alt=""><canvas id="mask-cv"></canvas></div>
+</dialog>
+
+<dialog id="dlg-video" class="wide">
+  <div class="cmp-head"><b id="vid-title"></b><span class="spacer"></span>
+    <button id="vid-save" class="primary"><svg class="ico"><use href="#i-down"/></svg>Guardar</button>
+    <button id="vid-close" class="ghost icon" title="Cerrar"><svg class="ico"><use href="#i-x"/></svg></button></div>
+  <video id="vid-play" class="maskvid" controls playsinline></video>
 </dialog>
 
 <dialog id="dlg-settings" class="small">

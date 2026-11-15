@@ -321,6 +321,70 @@ group("/api"):
             id, name, fmt, target, remote_id, in_path, out_path, os.file_size(in_path), info["width"], info["height"], info["width"], info["height"], time.now())
         return job_view(await get_job(id)).status(201)
 
+    # Quita una marca de un vídeo. `mask` (PNG del tamaño del vídeo) señala la marca en el fotograma del segundo `t`;
+    # se la sigue por todo el vídeo, también si se mueve. `mode`: «fast» (relleno clásico, casi en tiempo real) o
+    # «slow» (LaMa en cada fotograma: mejor, mucho más lento).
+    post endpoint("/inpaint/video", File file, File mask, string mode = "slow", float t = 0, string target = "local"):
+        need_csrf()
+        if not ["local", "server"].contains(target):
+            abort(400, "target debe ser local o server.")
+        if target == "local" and (not inpaint_ready() or convert.tools()["ffmpeg"] == ""):
+            abort(503, "Para limpiar vídeos hacen falta LaMa y ffmpeg, y este equipo no los tiene.")
+        if target == "server":
+            Json st = await remote_state(false)
+            if not st["configured"]:
+                abort(503, "Falta configurar el servidor (⚙).")
+            if not st["ok"]:
+                abort(503, "El servidor no responde: " + str(st["error"]))
+            if not st["inpaint"]:
+                abort(503, "El servidor no tiene LaMa instalado.")
+        if not ["fast", "slow"].contains(mode):
+            abort(400, "mode debe ser fast o slow.")
+        if t < 0.0 or t > 86400.0:
+            abort(400, "t no es un instante válido.")
+        string fname = text.truncate(os.path_basename(file.filename == null ? "video" : str(file.filename)), 120)
+        string vext = file_ext(fname)
+        if convert.kind(vext) != "video":
+            abort(400, fname + " no es un vídeo.")
+        Json counts = await queue_counts()
+        if counts["queued"] + counts["running"] >= max_queue():
+            abort(429, "Hay demasiados trabajos en cola. Espera a que termine alguno.")
+        string id = new_id()
+        string dir = job_dir(id)
+        os.make_dir(data_dir())
+        os.make_dir(jobs_root())
+        os.make_dir(dir)
+        string in_path = os.path_join(dir, "in." + vext)
+        await os.move(os.path_join(dir, file.save(dir)), in_path)
+        string mask_path = os.path_join(dir, "mask.png")
+        await os.move(os.path_join(dir, mask.save(dir)), mask_path)
+        Json minfo = null
+        try:
+            minfo = await image.info(mask_path)
+        catch e:
+            minfo = null
+        if minfo == null or minfo["width"] == null:
+            os.remove_dir(dir, true)
+            abort(400, "La máscara no es una imagen.")
+        string opts = json.stringify({ "mode": mode, "t": t })
+        string out_path = os.path_join(dir, "out.mp4")
+        string remote_id = ""
+        if target == "server":
+            Json row = { "id": id, "name": fname, "model": "lama", "scale": 1, "fmt": "mp4", "in_path": in_path, "out_path": out_path, "kind": "inpaint", "opts": opts }
+            Json up = null
+            try:
+                up = await remote_upload(row)
+            catch e:
+                up = { "ok": false, "remote_id": "", "error": "no se pudo subir al servidor: " + e.message }
+            if not up["ok"]:
+                os.remove_dir(dir, true)
+                abort(502, str(up["error"]))
+            remote_id = up["remote_id"]
+        await sqlite.exec(
+            "insert into jobs (id, kind, name, model, scale, fmt, target, remote_id, in_path, out_path, in_bytes, in_w, in_h, opts, created_at) values (?, 'inpaint', ?, 'lama', 1, 'mp4', ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            id, fname, target, remote_id, in_path, out_path, os.file_size(in_path), minfo["width"], minfo["height"], opts, time.now())
+        return job_view(await get_job(id)).status(201)
+
     delete endpoint("/jobs/:id", string id):
         need_csrf()
         Json r = await get_job(id)

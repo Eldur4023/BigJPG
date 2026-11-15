@@ -1,5 +1,6 @@
 # Quitar marcas de agua y objetos: LaMa (ONNX) por el módulo nativo `inpaint` de Lux, sin Python. El módulo
 # trabaja con PNM (P6/P5); ImageMagick pasa la imagen y la máscara a ese formato y devuelve el resultado.
+# Con vídeos (formato mp4) pasa por `inpaint.video`, que además sigue la marca si se mueve.
 # Esta librería es IDÉNTICA en server/ y desktop/.
 
 fn bool inpaint_ready():
@@ -11,6 +12,52 @@ fn Json magick_step(string magick, List<string> args):
         return { "ok": false, "error": text.truncate(str(r["stderr"]).trim().replace("\n", " · "), 300) }
     return { "ok": true, "error": "" }
 
+# Vídeo: el módulo sigue la marca por todos los fotogramas y la quita en cada uno (ver inpaint.cpp). Es una sola
+# llamada nativa que no se puede interrumpir desde aquí: la barra y la cancelación pasan por dos ficheros del
+# trabajo («progress» lo escribe el módulo, «cancel» lo escribe `video_watch`, abajo). `opts` = {"mode", "t"}.
+fn Json run_video(Json job):
+    string dir = os.path_dirname(job["in_path"])
+    string magick = convert.tools()["magick"]
+    string ffmpeg = convert.tools()["ffmpeg"]
+    if ffmpeg == "":
+        return { "ok": false, "error": "Para limpiar vídeos hace falta ffmpeg", "device": "" }
+    Json o = { "mode": "slow", "t": 0 }
+    try:
+        o = json.parse(job["opts"])
+    catch e:
+        o = { "mode": "slow", "t": 0 }
+    string pgm = os.path_join(dir, "mask.pgm")
+    for string f in ["progress", "cancel"]:
+        if os.is_file(os.path_join(dir, f)):
+            os.remove_file(os.path_join(dir, f))
+    Json b = await magick_step(magick, [os.path_join(dir, "mask.png"), "-background", "black", "-alpha", "remove", "-alpha", "off", "-colorspace", "Gray", "-depth", "8", pgm])
+    if not b["ok"]:
+        return { "ok": false, "error": b["error"], "device": "" }
+    try:
+        await inpaint.video(os.path_join(engine_dir(), "lama_fp32.onnx"), job["in_path"], pgm, job["out_path"], {
+            "mode": o["mode"] == "fast" ? "fast" : "lama", "t": o["t"], "ffmpeg": ffmpeg,
+            "lib": os.path_join(engine_dir(), "libonnxruntime.so"),
+            "progress": os.path_join(dir, "progress"), "cancel": os.path_join(dir, "cancel") })
+    catch e:
+        return { "ok": false, "error": text.truncate(e.message.replace("inpaint.video(): ", ""), 300), "device": "" }
+    return { "ok": true, "error": "", "device": "" }
+
+# Cada segundo: pasa el porcentaje del módulo a la cola y, si se canceló el trabajo, le avisa para que pare.
+every "1s":
+    try:
+        long now = time.now()
+        for Json j in await sqlite.query("select id, status from jobs where kind = 'inpaint' and fmt = 'mp4' and status in ('running', 'canceled') and coalesce(finished_at, ?) > ?", now, now - 120000):
+            string dir = job_dir(j["id"])
+            if j["status"] == "canceled":
+                if os.is_file(os.path_join(dir, "progress")) and not os.is_file(os.path_join(dir, "cancel")):
+                    await os.write_file(os.path_join(dir, "cancel"), "1")
+            else if os.is_file(os.path_join(dir, "progress")):
+                string p = (await os.read_file(os.path_join(dir, "progress"))).trim()
+                if regex.test("^[0-9]+$", p):
+                    await sqlite.exec("update jobs set progress = ? where id = ? and status = 'running'", float(p), j["id"])
+    catch e:
+        log.warn("vídeo: " + e.message)
+
 # Ejecuta una limpieza. Devuelve {"ok", "error", "device"}. LaMa no se puede interrumpir a media inferencia:
 # cancelar sólo descarta el resultado (la cola lo trata igual que con el motor).
 fn Json run_inpaint(Json job):
@@ -21,6 +68,8 @@ fn Json run_inpaint(Json job):
     string outppm = os.path_join(dir, "out.ppm")
     if not inpaint_ready():
         return { "ok": false, "error": "LaMa no está instalado (engine/install-engine.sh)", "device": "" }
+    if job["fmt"] == "mp4":
+        return await run_video(job)
     Json a = await magick_step(magick, [job["in_path"] + "[0]", "-auto-orient", "-background", "white", "-alpha", "remove", "-alpha", "off", "-depth", "8", ppm])
     if not a["ok"]:
         return { "ok": false, "error": a["error"], "device": "" }

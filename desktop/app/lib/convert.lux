@@ -27,7 +27,7 @@ fn List<string> pdf_pages(string dir):
 
 # Trabajos cuyo resultado no es una imagen que medir ni ampliar.
 fn bool is_file_job(Json job):
-    return job["kind"] == "convert" or job["kind"] == "pdf"
+    return job["kind"] == "convert" or job["kind"] == "pdf" or (job["kind"] == "inpaint" and job["fmt"] == "mp4")
 
 # Ejecuta una conversión (o la unión de imágenes en un PDF, que va por ImageMagick). Devuelve {"ok", "error"}. Sin porcentaje real (ffmpeg y pandoc no lo dan de forma
 # uniforme): la interfaz muestra una barra indeterminada. ponytail: con ffprobe + -progress se podría medir.

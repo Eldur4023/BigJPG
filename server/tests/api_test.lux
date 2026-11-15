@@ -244,3 +244,5 @@ test "quitar marca: sin LaMa instalado responde 503 y /api/info lo dice":
     test.eq((await get("/api/info"))["body"]["inpaint"], false)
     Json r = await os.run("curl", ["-s", "-m", "20", "-o", "/dev/null", "-w", "%{http_code}", "-H", "X-Requested-With: bigjpg", "-F", "file=@" + files() + "/small.png", "-F", "mask=@" + files() + "/small.png", url("/api/inpaint")], { "timeout_ms": 30000 })
     test.eq(str(r["stdout"]), "503")
+    Json v = await os.run("curl", ["-s", "-m", "20", "-o", "/dev/null", "-w", "%{http_code}", "-H", "X-Requested-With: bigjpg", "-F", "file=@" + files() + "/small.png", "-F", "mask=@" + files() + "/small.png", url("/api/inpaint/video")], { "timeout_ms": 30000 })
+    test.eq(str(v["stdout"]), "503")

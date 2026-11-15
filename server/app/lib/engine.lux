@@ -102,7 +102,14 @@ fn Json run_engine(Json job):
         return { "ok": false, "error": why == "" ? "el motor terminó con código " + str(code) : why, "device": device }
     if native != job["scale"]:
         int rh = proc.start(magick, [job["out_path"], "-resize", str(job["scale"] * 25) + "%", job["out_path"]], { "stdout": "null", "stderr": "null" })
-        Json rc = await proc.wait(rh, 120000)
+        # proc.wait() admite como mucho 30000 ms: se espera en tandas hasta 2 min.
+        Json rc = null
+        int tries = 0
+        while rc == null and tries < 4:
+            rc = await proc.wait(rh, 30000)
+            tries = tries + 1
+        if rc == null:
+            proc.kill(rh)
         proc.close(rh)
         if rc != 0:
             return { "ok": false, "error": "no se pudo reducir a ×" + str(job["scale"]), "device": device }

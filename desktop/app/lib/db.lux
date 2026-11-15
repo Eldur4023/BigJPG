@@ -37,6 +37,10 @@ fn List<Json> migrations():
         ],
         [
             "alter table jobs add column kind text not null default 'upscale'"
+        ],
+        [
+            # opts: ajustes del trabajo en JSON (vídeo: modo y fotograma)
+            "alter table jobs add column opts text not null default ''"
         ]
     ]
 
