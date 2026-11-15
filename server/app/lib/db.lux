@@ -42,6 +42,10 @@ fn List<Json> migrations():
         [
             # opts: ajustes del trabajo en JSON (vídeo: modo y fotograma)
             "alter table jobs add column opts text not null default ''"
+        ],
+        [
+            # step: el paso en curso de una cadena de operaciones (kind = 'chain')
+            "alter table jobs add column step integer not null default 0"
         ]
     ]
 

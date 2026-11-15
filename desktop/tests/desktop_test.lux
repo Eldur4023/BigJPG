@@ -192,3 +192,30 @@ test "convertir: en este equipo y en el servidor":
         test.eq(res["status"], 200)
         test.contains(str(res["headers"]["content-disposition"]), "small.jpg")
     test.eq((await get("/api/info"))["body"]["convert"]["server"]["ready"], true)
+
+fn Json chain_post(string steps):
+    Json r = await os.run("curl", ["-s", "-m", "30", "-w", "\n%{http_code}", "-H", "X-Requested-With: bigjpg", "-F", "file=@" + files() + "/small.png", "--form-string", "steps=" + steps, url("/api/chain")], { "timeout_ms": 40000 })
+    List<string> parts = str(r["stdout"]).split("\n")
+    return { "status": int(parts[len(parts) - 1]), "body": json.parse(parts[0]) }
+
+test "cadena repartida: un paso aquí y otro en el servidor, y el resultado vuelve":
+    test.ok(await use_server())
+    await set_mode("local", "ok")
+    await set_mode("server", "ok")
+    # Ampliar ×4 en el servidor (el archivo viaja y vuelve) y luego pasar a JPG en este equipo
+    Json mixed = await chain_post("[{\"op\":\"upscale\",\"model\":\"anime\",\"scale\":4,\"fmt\":\"png\",\"on\":\"server\"},{\"op\":\"convert\",\"fmt\":\"jpg\",\"on\":\"local\"}]")
+    test.eq(mixed["status"], 201, str(mixed["body"]))
+    test.eq(mixed["body"]["target"], "local")
+    Json done = await wait_done(mixed["body"]["id"])
+    test.eq(done["status"], "done", str(done))
+    test.eq(done["out"]["w"], 32)
+    test.eq(done["format"], "jpg")
+    # todo en el servidor: se sube entero y aquí sólo se refleja
+    Json all = await chain_post("[{\"op\":\"upscale\",\"model\":\"anime\",\"scale\":4,\"fmt\":\"png\",\"on\":\"server\"}]")
+    test.eq(all["status"], 201, str(all["body"]))
+    test.eq(all["body"]["target"], "server")
+    test.eq((await wait_done(all["body"]["id"]))["status"], "done")
+    # el servidor se cae: un paso suyo no se acepta
+    test.eq((await post_json("/api/settings", { "server_url": "" }))["status"], 200)
+    Json none = await chain_post("[{\"op\":\"upscale\",\"model\":\"anime\",\"scale\":4,\"fmt\":\"png\",\"on\":\"server\"}]")
+    test.eq(none["status"], 503, str(none["body"]))

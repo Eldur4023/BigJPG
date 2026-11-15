@@ -14,28 +14,29 @@ fn Json magick_step(string magick, List<string> args):
 
 # Vídeo: el módulo sigue la marca por todos los fotogramas y la quita en cada uno (ver inpaint.cpp). Es una sola
 # llamada nativa que no se puede interrumpir desde aquí: la barra y la cancelación pasan por dos ficheros del
-# trabajo («progress» lo escribe el módulo, «cancel» lo escribe `video_watch`, abajo). `opts` = {"mode", "t"}.
+# trabajo («progress» lo escribe el módulo, «cancel» lo escribe `video_watch`, abajo). `opts` = {"mode", "tms"} (instante del fotograma en milisegundos).
 fn Json run_video(Json job):
     string dir = os.path_dirname(job["in_path"])
     string magick = convert.tools()["magick"]
     string ffmpeg = convert.tools()["ffmpeg"]
     if ffmpeg == "":
         return { "ok": false, "error": "Para limpiar vídeos hace falta ffmpeg", "device": "" }
-    Json o = { "mode": "slow", "t": 0 }
+    Json o = { "mode": "slow", "tms": 0 }
     try:
         o = json.parse(job["opts"])
     catch e:
-        o = { "mode": "slow", "t": 0 }
+        o = { "mode": "slow", "tms": 0 }
+    string mask_png = job["mask_path"] != null ? str(job["mask_path"]) : os.path_join(dir, "mask.png")
     string pgm = os.path_join(dir, "mask.pgm")
     for string f in ["progress", "cancel"]:
         if os.is_file(os.path_join(dir, f)):
             os.remove_file(os.path_join(dir, f))
-    Json b = await magick_step(magick, [os.path_join(dir, "mask.png"), "-background", "black", "-alpha", "remove", "-alpha", "off", "-colorspace", "Gray", "-depth", "8", pgm])
+    Json b = await magick_step(magick, [mask_png, "-background", "black", "-alpha", "remove", "-alpha", "off", "-colorspace", "Gray", "-depth", "8", pgm])
     if not b["ok"]:
         return { "ok": false, "error": b["error"], "device": "" }
     try:
         await inpaint.video(os.path_join(engine_dir(), "lama_fp32.onnx"), job["in_path"], pgm, job["out_path"], {
-            "mode": o["mode"] == "fast" ? "fast" : "lama", "t": o["t"], "ffmpeg": ffmpeg,
+            "mode": o["mode"] == "fast" ? "fast" : "lama", "t": o["tms"] / 1000.0, "ffmpeg": ffmpeg,
             "lib": os.path_join(engine_dir(), "libonnxruntime.so"),
             "progress": os.path_join(dir, "progress"), "cancel": os.path_join(dir, "cancel") })
     catch e:
@@ -46,7 +47,7 @@ fn Json run_video(Json job):
 every "1s":
     try:
         long now = time.now()
-        for Json j in await sqlite.query("select id, status from jobs where kind = 'inpaint' and fmt = 'mp4' and status in ('running', 'canceled') and coalesce(finished_at, ?) > ?", now, now - 120000):
+        for Json j in await sqlite.query("select id, kind, status, opts, step from jobs where kind in ('inpaint', 'chain') and status in ('running', 'canceled') and coalesce(finished_at, ?) > ?", now, now - 120000):
             string dir = job_dir(j["id"])
             if j["status"] == "canceled":
                 if os.is_file(os.path_join(dir, "progress")) and not os.is_file(os.path_join(dir, "cancel")):
@@ -54,7 +55,8 @@ every "1s":
             else if os.is_file(os.path_join(dir, "progress")):
                 string p = (await os.read_file(os.path_join(dir, "progress"))).trim()
                 if regex.test("^[0-9]+$", p):
-                    await sqlite.exec("update jobs set progress = ? where id = ? and status = 'running'", float(p), j["id"])
+                    float v = float(p)
+                    await sqlite.exec("update jobs set progress = ? where id = ? and status = 'running'", j["kind"] == "chain" ? chain_pct(j, v) : v, j["id"])
     catch e:
         log.warn("vídeo: " + e.message)
 
@@ -73,7 +75,14 @@ fn Json run_inpaint(Json job):
     Json a = await magick_step(magick, [job["in_path"] + "[0]", "-auto-orient", "-background", "white", "-alpha", "remove", "-alpha", "off", "-depth", "8", ppm])
     if not a["ok"]:
         return { "ok": false, "error": a["error"], "device": "" }
-    Json b = await magick_step(magick, [os.path_join(dir, "mask.png"), "-background", "black", "-alpha", "remove", "-alpha", "off", "-colorspace", "Gray", "-depth", "8", pgm])
+    # La máscara se pinta sobre el archivo original; en una cadena la imagen puede haber cambiado de tamaño
+    # (tras ampliar), así que se lleva a la medida de la imagen que toca limpiar.
+    Json dims = await os.run(magick, [ppm, "-format", "%w %h", "info:"], { "timeout_ms": 60000 })
+    List<string> wh = str(dims["stdout"]).trim().split(" ")
+    if dims["status"] != 0 or len(wh) != 2:
+        return { "ok": false, "error": "no se pudo medir la imagen", "device": "" }
+    string mask_src = job["mask_path"] != null ? str(job["mask_path"]) : os.path_join(dir, "mask.png")
+    Json b = await magick_step(magick, [mask_src, "-resize", wh[0] + "x" + wh[1] + "!", "-background", "black", "-alpha", "remove", "-alpha", "off", "-colorspace", "Gray", "-depth", "8", pgm])
     if not b["ok"]:
         return { "ok": false, "error": b["error"], "device": "" }
     Json r = null
@@ -96,3 +105,33 @@ fn Json run_inpaint(Json job):
     if not c["ok"]:
         return { "ok": false, "error": c["error"], "device": "" }
     return { "ok": true, "error": "", "device": "" }
+
+# ── vista previa de vídeos ──────────────────────────────────────────────────
+# El navegador (WebKitGTK) no siempre sabe reproducir el vídeo que se quiere limpiar, así que el fotograma donde
+# se marca la marca lo saca ffmpeg: se sube el vídeo una vez y se piden fotogramas por instante.
+
+fn string previews_root():
+    return os.path_join(data_dir(), "previews")
+
+fn string ffprobe_bin():
+    string ff = convert.tools()["ffmpeg"]
+    return ff.ends_with("ffmpeg") ? ff.slice(0, len(ff) - 6) + "ffprobe" : "ffprobe"
+
+# Las vistas previas se borran pasada una hora.
+every "10m":
+    try:
+        if os.is_dir(previews_root()):
+            for string name in os.list_dir(previews_root()):
+                string d = os.path_join(previews_root(), name)
+                if time.now() - os.mtime_ms(d) > 3600000:
+                    os.remove_dir(d, true)
+    catch e:
+        log.warn("vistas previas: " + e.message)
+
+# Segundos con punto decimal para ffmpeg («12.500»), a partir de milisegundos: str() de un float usaría la coma
+# decimal del idioma del sistema.
+fn string secs_str(int ms):
+    string f = str(ms % 1000)
+    while len(f) < 3:
+        f = "0" + f
+    return str(int((ms - ms % 1000) / 1000)) + "." + f

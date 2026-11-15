@@ -26,6 +26,7 @@ fn Json job_view(Json r):
     return {
         "id": r["id"], "kind": r["kind"], "name": r["name"], "model": r["model"], "scale": r["scale"], "format": r["fmt"], "target": r["target"],
         "status": r["status"], "progress": r["progress"], "error": r["error"],
+        "steps": r["kind"] == "chain" ? json.parse(r["opts"])["steps"] : null, "step": r["step"],
         "in": { "w": r["in_w"], "h": r["in_h"], "bytes": r["in_bytes"] },
         "out": { "w": r["out_w"], "h": r["out_h"], "bytes": r["out_bytes"] },
         "created_at": r["created_at"], "started_at": r["started_at"], "finished_at": r["finished_at"]
@@ -33,6 +34,8 @@ fn Json job_view(Json r):
 
 # Lo que se añade al nombre al guardar el resultado: «foto_x4.png», «foto_limpia.png», «documento.pdf».
 fn string result_suffix(Json r):
+    if r["kind"] == "chain":
+        return chain_suffix(r)
     if r["kind"] == "inpaint":
         return "_limpia"
     return is_file_job(r) ? "" : "_x" + str(r["scale"])
@@ -52,6 +55,8 @@ fn bool remove_job(string id):
 # Cada clase de trabajo tiene su ejecutor: ampliar (Real-ESRGAN), convertir y unir en PDF (ffmpeg, ImageMagick,
 # pandoc) o quitar marcas (LaMa).
 fn Json run_job(Json job):
+    if job["kind"] == "chain":
+        return await run_chain(job)
     if job["kind"] == "inpaint":
         return await run_inpaint(job)
     if is_file_job(job):
@@ -65,7 +70,12 @@ fn bool run_next():
     int taken = await sqlite.exec("update jobs set status = 'running', progress = 0, started_at = ? where id = ? and status = 'queued'", time.now(), job["id"])
     if taken == 0:
         return true
-    Json res = await run_job(job)
+    Json res = null
+    try:
+        res = await run_job(job)
+    catch e:
+        # Un fallo inesperado en un ejecutor no deja el trabajo «en marcha» para siempre.
+        res = { "ok": false, "error": text.truncate(e.message, 300), "device": "" }
     if res["device"] != null and res["device"] != "":
         await meta_set("device", res["device"])
     Json cur = await get_job(job["id"])
@@ -132,7 +142,7 @@ fn bool mirror_one(Json job):
     else if st == "error" or st == "canceled":
         await sqlite.exec("update jobs set status = 'error', error = ?, finished_at = ? where id = ?", st == "canceled" ? "cancelado en el servidor" : str(b["error"]), now, job["id"])
     else:
-        await sqlite.exec("update jobs set status = ?, progress = ?, fails = 0, started_at = coalesce(started_at, ?) where id = ?", st, b["progress"], now, job["id"])
+        await sqlite.exec("update jobs set status = ?, progress = ?, step = ?, fails = 0, started_at = coalesce(started_at, ?) where id = ?", st, b["progress"], b["step"] == null ? 0 : b["step"], now, job["id"])
     return true
 
 every "2s":

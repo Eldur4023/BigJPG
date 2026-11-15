@@ -1,0 +1,141 @@
+# Cadenas de operaciones: un archivo pasa por varios pasos (ampliar, quitar marca, convertir) uno detrás de otro.
+# El trabajo guarda en `opts` {"steps": [...]} y en `step` el paso en curso. Cada paso reutiliza el ejecutor de
+# siempre (run_engine, run_inpaint, run_convert) sobre un trabajo suelto cuya entrada es la salida del anterior.
+#   {"op": "upscale", "model": "anime", "scale": 2, "fmt": "png"}
+#   {"op": "inpaint", "fmt": "png"}                   imagen (la máscara viaja aparte: mask.png, a la medida de la original)
+#   {"op": "inpaint", "mode": "fast", "tms": 1500}    vídeo (mode fast|slow; tms = instante del fotograma, en ms)
+#   {"op": "convert", "fmt": "webp"}
+# Esta librería es IDÉNTICA en server/ y desktop/.
+
+fn bool is_image_ext(string e):
+    return ["png", "jpg", "jpeg", "webp"].contains(e)
+
+# {"error": "" | motivo, "ext": formato del resultado}. Sigue el formato del archivo paso a paso: lo que ve cada
+# paso es lo que dejó el anterior (no se amplía un MP3, ni se convierte un PNG a un formato de audio).
+fn Json check_steps(string ext, List<Json> steps):
+    if len(steps) == 0 or len(steps) > 6:
+        return { "error": "Pon entre 1 y 6 operaciones.", "ext": ext }
+    string cur = ext
+    int marks = 0
+    for Json st in steps:
+        string op = str(st["op"])
+        if op == "upscale":
+            Json m = find_model(str(st["model"]))
+            if not is_image_ext(cur):
+                return { "error": "Ampliar sólo vale para JPG, PNG o WebP (convierte antes).", "ext": cur }
+            if m == null or not m["scales"].contains(st["scale"]):
+                return { "error": "Ese modelo no admite esa escala.", "ext": cur }
+            if not ["png", "jpg", "webp"].contains(str(st["fmt"])):
+                return { "error": "Formato de salida no válido: " + str(st["fmt"]), "ext": cur }
+            cur = str(st["fmt"])
+        else if op == "inpaint":
+            marks = marks + 1
+            string k = convert.kind(cur)
+            if marks > 1:
+                return { "error": "Sólo una operación de quitar marca por archivo.", "ext": cur }
+            if k == "video":
+                if not ["fast", "slow"].contains(str(st["mode"])):
+                    return { "error": "El modo debe ser fast o slow.", "ext": cur }
+                cur = "mp4"
+            else if k == "image":
+                if not ["png", "jpg", "webp"].contains(str(st["fmt"])):
+                    return { "error": "Formato de salida no válido: " + str(st["fmt"]), "ext": cur }
+                cur = str(st["fmt"])
+            else:
+                return { "error": "Quitar marca sólo vale para imágenes y vídeos.", "ext": cur }
+        else if op == "convert":
+            string fmt = str(st["fmt"])
+            if not (fmt == "pdf" and convert.kind(cur) == "image") and not convert.can(cur, fmt):
+                return { "error": "No se puede convertir ." + cur + " a ." + fmt + ".", "ext": cur }
+            cur = fmt
+        else:
+            return { "error": "Operación desconocida: " + op, "ext": cur }
+    return { "error": "", "ext": cur }
+
+# ¿Hay en este equipo lo que hace falta para cada paso? "" si sí; si no, qué falta.
+fn string steps_missing(List<Json> steps):
+    for Json st in steps:
+        string op = str(st["op"])
+        if op == "upscale" and not engine_ready():
+            return "El motor Real-ESRGAN no está instalado."
+        if op == "inpaint" and (not inpaint_ready() or convert.tools()["ffmpeg"] == ""):
+            return "Para quitar marcas hacen falta LaMa, ImageMagick y ffmpeg."
+        if op == "convert" and not convert_info()["ready"]:
+            return "Faltan herramientas de conversión (ffmpeg, ImageMagick o pandoc)."
+    return ""
+
+fn string chain_suffix(Json job):
+    string s = ""
+    List<Json> steps = json.parse(job["opts"])["steps"]
+    for Json st in steps:
+        if st["op"] == "upscale":
+            s = s + "_x" + str(st["scale"])
+        else if st["op"] == "inpaint":
+            s = s + "_limpia"
+    return s
+
+# El porcentaje global de la cadena a partir del del paso en curso.
+fn float chain_pct(Json row, float p):
+    int n = len(json.parse(row["opts"])["steps"])
+    return n == 0 ? p : (row["step"] + p / 100.0) / n * 100.0
+
+# Porcentaje de un ejecutor suelto: si es un paso de una cadena (trae `pn`, nº de pasos), se reparte.
+fn float scaled_pct(Json sub, float pct):
+    return sub["pn"] == null ? pct : (sub["pi"] + pct / 100.0) / sub["pn"] * 100.0
+
+# El formato en que un paso deja el archivo.
+fn string step_ext(string cur_ext, Json st):
+    if st["op"] == "convert":
+        return str(st["fmt"])
+    if st["op"] == "inpaint" and convert.kind(cur_ext) == "video":
+        return "mp4"
+    return str(st["fmt"])
+
+# Ejecuta la cadena. Cada paso lleva `on`: «server» lo hace el servidor (sólo en el escritorio, ver
+# run_remote_segment en lib/remote.lux); cualquier otra cosa, este equipo. Los pasos seguidos que van al servidor
+# viajan juntos, en un solo trabajo suyo.
+fn Json run_chain(Json job):
+    string dir = os.path_dirname(job["in_path"])
+    List<Json> steps = json.parse(job["opts"])["steps"]
+    int n = len(steps)
+    string cur = job["in_path"]
+    string cur_ext = file_ext(cur)
+    string device = ""
+    int i = 0
+    while i < n:
+        Json st = steps[i]
+        await sqlite.exec("update jobs set step = ? where id = ? and status = 'running'", i, job["id"])
+        int j = i + 1
+        List<Json> seg = [st]
+        bool away = delegates() and st["on"] == "server"
+        if away:
+            while j < n and steps[j]["on"] == "server":
+                seg.add(steps[j])
+                j = j + 1
+        string out_ext = cur_ext
+        for Json sg in seg:
+            out_ext = step_ext(out_ext, sg)
+        string out = j == n ? job["out_path"] : os.path_join(dir, "s" + str(j - 1) + "." + out_ext)
+        string op = str(st["op"])
+        Json res = null
+        if away:
+            res = await run_remote_segment(job, cur, seg, out, i, n)
+        else if op == "upscale":
+            res = await run_engine({ "id": job["id"], "kind": "upscale", "in_path": cur, "out_path": out, "model": st["model"], "scale": st["scale"], "fmt": out_ext, "pi": i, "pn": n })
+            if res["device"] != "":
+                device = res["device"]
+        else if op == "inpaint":
+            res = await run_inpaint({ "id": job["id"], "kind": "inpaint", "in_path": cur, "out_path": out, "fmt": out_ext, "mask_path": os.path_join(dir, "mask.png"), "opts": json.stringify(st) })
+            if os.is_file(os.path_join(dir, "progress")):
+                os.remove_file(os.path_join(dir, "progress"))
+        else:
+            bool pdf = out_ext == "pdf" and convert.kind(cur_ext) == "image"
+            res = await run_convert({ "id": job["id"], "kind": pdf ? "pdf" : "convert", "in_path": cur, "out_path": out, "fmt": out_ext, "pdf_from": cur })
+        if not res["ok"]:
+            return { "ok": false, "error": res["error"], "device": device }
+        if cur != job["in_path"] and os.is_file(cur):
+            os.remove_file(cur)
+        cur = out
+        cur_ext = out_ext
+        i = j
+    return { "ok": true, "error": "", "device": device }

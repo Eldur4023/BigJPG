@@ -321,10 +321,166 @@ group("/api"):
             id, name, fmt, target, remote_id, in_path, out_path, os.file_size(in_path), info["width"], info["height"], info["width"], info["height"], time.now())
         return job_view(await get_job(id)).status(201)
 
+    # Una cadena de operaciones sobre un archivo: `steps` es una lista JSON de pasos (ver lib/chain.lux) que se hacen
+    # una detrás de otra. Si lleva «quitar marca», `masks` trae su máscara (PNG; blanco = quitar), pintada sobre
+    # el archivo original.
+    post endpoint("/chain", File file, string steps, List<File> masks, string target = ""):
+        need_csrf()
+        if not ["", "local", "server"].contains(target):
+            abort(400, "target debe ser local o server.")
+        List<Json> list = []
+        try:
+            list = json.parse(steps)
+        catch e:
+            abort(400, "steps no es una lista JSON.")
+        string fname = text.truncate(os.path_basename(file.filename == null ? "archivo" : str(file.filename)), 120)
+        string ext = file_ext(fname)
+        if convert.kind(ext) == "":
+            abort(400, "No sé trabajar con ese tipo de archivo.")
+        Json chk = check_steps(ext, list)
+        if chk["error"] != "":
+            abort(400, str(chk["error"]))
+        bool marked = false
+        bool grows = false
+        for Json st in list:
+            if st["op"] == "inpaint":
+                marked = true
+            if st["op"] == "upscale":
+                grows = true
+        if marked and len(masks) != 1:
+            abort(400, "Falta la máscara de quitar marca.")
+        if not marked and len(masks) > 0:
+            abort(400, "Sobra una máscara.")
+        # Dónde se hace cada paso: su `on` («local» o «server»); con target=server, todos en el servidor.
+        List<Json> loc = []
+        List<Json> srv = []
+        for Json s2 in list:
+            string where = target == "server" ? "server" : str(s2["on"])
+            if where == "server":
+                srv.add(s2)
+            else:
+                loc.add(s2)
+        string missing = steps_missing(loc)
+        if missing != "":
+            abort(503, missing)
+        if len(srv) > 0:
+            Json rs = await remote_state(false)
+            if not rs["configured"]:
+                abort(503, "Falta configurar el servidor (⚙).")
+            if not rs["ok"]:
+                abort(503, "El servidor no responde: " + str(rs["error"]))
+            for Json s3 in srv:
+                string op = str(s3["op"])
+                if (op == "upscale" and not rs["ready"]) or (op == "inpaint" and not rs["inpaint"]) or (op == "convert" and (rs["convert"] == null or rs["convert"]["ready"] != true)):
+                    abort(503, "El servidor no tiene lo necesario para «" + op + "».")
+        # Todo en el servidor: se sube entero y aquí sólo se refleja. Si no, corre aquí y delega los pasos del servidor.
+        string jt = len(loc) == 0 ? "server" : "local"
+        Json counts = await queue_counts()
+        if counts["queued"] + counts["running"] >= max_queue():
+            abort(429, "Hay demasiados trabajos en cola. Espera a que termine alguno.")
+        string id = new_id()
+        string dir = job_dir(id)
+        os.make_dir(data_dir())
+        os.make_dir(jobs_root())
+        os.make_dir(dir)
+        string in_path = os.path_join(dir, "in." + ext)
+        await os.move(os.path_join(dir, file.save(dir)), in_path)
+        int w = 0
+        int h = 0
+        if is_image_ext(ext):
+            Json info = null
+            try:
+                info = await image.info(in_path)
+            catch e:
+                info = null
+            if info == null or info["width"] == null:
+                os.remove_dir(dir, true)
+                abort(400, "No es una imagen válida.")
+            w = info["width"]
+            h = info["height"]
+            if grows and w * h > max_pixels():
+                os.remove_dir(dir, true)
+                abort(413, "La imagen tiene más de " + str(int(max_pixels() / 1000000)) + " megapíxeles.")
+        if marked:
+            string mask_path = os.path_join(dir, "mask.png")
+            await os.move(os.path_join(dir, masks[0].save(dir)), mask_path)
+            Json minfo = null
+            try:
+                minfo = await image.info(mask_path)
+            catch e:
+                minfo = null
+            if minfo == null or minfo["width"] == null:
+                os.remove_dir(dir, true)
+                abort(400, "La máscara no es una imagen.")
+            if w == 0:
+                w = minfo["width"]
+                h = minfo["height"]
+        string out_path = os.path_join(dir, "out." + str(chk["ext"]))
+        string opts = json.stringify({ "steps": list })
+        string remote_id = ""
+        if jt == "server":
+            Json up = null
+            try:
+                up = await remote_upload({ "id": id, "name": fname, "kind": "chain", "fmt": str(chk["ext"]), "in_path": in_path, "out_path": out_path, "opts": opts })
+            catch e:
+                up = { "ok": false, "remote_id": "", "error": "no se pudo subir al servidor: " + e.message }
+            if not up["ok"]:
+                os.remove_dir(dir, true)
+                abort(502, str(up["error"]))
+            remote_id = up["remote_id"]
+        await sqlite.exec(
+            "insert into jobs (id, kind, name, model, scale, fmt, target, remote_id, in_path, out_path, in_bytes, in_w, in_h, opts, created_at) values (?, 'chain', ?, 'chain', 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            id, fname, str(chk["ext"]), jt, remote_id, in_path, out_path, os.file_size(in_path), w, h, opts, time.now())
+        return job_view(await get_job(id)).status(201)
+
+    # Sube un vídeo para elegir en él el fotograma de la marca (ver «vista previa de vídeos» en lib/inpaint.lux).
+    post endpoint("/video/preview", File file):
+        need_csrf()
+        if convert.tools()["ffmpeg"] == "":
+            abort(503, "Para limpiar vídeos hace falta ffmpeg.")
+        string fname = text.truncate(os.path_basename(file.filename == null ? "video" : str(file.filename)), 120)
+        string vext = file_ext(fname)
+        if convert.kind(vext) != "video":
+            abort(400, fname + " no es un vídeo.")
+        string id = new_id()
+        string dir = os.path_join(previews_root(), id)
+        os.make_dir(data_dir())
+        os.make_dir(previews_root())
+        os.make_dir(dir)
+        await os.move(os.path_join(dir, file.save(dir)), os.path_join(dir, "in." + vext))
+        Json r = await os.run(ffprobe_bin(), ["-v", "error", "-show_entries", "format=duration", "-of", "csv=p=0", os.path_join(dir, "in." + vext)], { "timeout_ms": 20000 })
+        # La duración se lee a mano («69.336»): float() y str() siguen el idioma del sistema (coma decimal).
+        string dur = str(r["stdout"]).trim()
+        if r["status"] != 0 or not regex.test("^[0-9]+(\\.[0-9]+)?$", dur):
+            os.remove_dir(dir, true)
+            abort(400, "No se puede leer ese vídeo.")
+        List<string> dp = dur.split(".")
+        int ms = int(dp[0]) * 1000 + (len(dp) > 1 ? int((dp[1] + "000").slice(0, 3)) : 0)
+        return { "id": id, "duration_ms": ms }
+
+    # Un fotograma de la vista previa, en PNG, en el instante `t` (segundos).
+    get endpoint("/video/preview/:id/frame", string id, int tms = 0):
+        if not regex.test("^[0-9a-f]{24}$", id):
+            abort(404, "No existe esa vista previa.")
+        string dir = os.path_join(previews_root(), id)
+        string src = ""
+        if os.is_dir(dir):
+            for string n in os.list_dir(dir):
+                if n.starts_with("in."):
+                    src = os.path_join(dir, n)
+        if src == "":
+            abort(404, "No existe esa vista previa.")
+        string out = os.path_join(dir, "f" + str(tms < 0 ? 0 : tms) + ".png")
+        if not os.is_file(out):
+            Json r = await os.run(convert.tools()["ffmpeg"], ["-v", "error", "-y", "-ss", secs_str(tms), "-i", src, "-an", "-frames:v", "1", out], { "timeout_ms": 30000 })
+            if r["status"] != 0 or not os.is_file(out):
+                abort(400, "No se pudo sacar ese fotograma.")
+        return send_file(out, { "inline": true }).header("Cache-Control", "private, max-age=600")
+
     # Quita una marca de un vídeo. `mask` (PNG del tamaño del vídeo) señala la marca en el fotograma del segundo `t`;
     # se la sigue por todo el vídeo, también si se mueve. `mode`: «fast» (relleno clásico, casi en tiempo real) o
     # «slow» (LaMa en cada fotograma: mejor, mucho más lento).
-    post endpoint("/inpaint/video", File file, File mask, string mode = "slow", float t = 0, string target = "local"):
+    post endpoint("/inpaint/video", File file, File mask, string mode = "slow", int tms = 0, string target = "local"):
         need_csrf()
         if not ["local", "server"].contains(target):
             abort(400, "target debe ser local o server.")
@@ -340,8 +496,8 @@ group("/api"):
                 abort(503, "El servidor no tiene LaMa instalado.")
         if not ["fast", "slow"].contains(mode):
             abort(400, "mode debe ser fast o slow.")
-        if t < 0.0 or t > 86400.0:
-            abort(400, "t no es un instante válido.")
+        if tms < 0 or tms > 86400000:
+            abort(400, "tms no es un instante válido.")
         string fname = text.truncate(os.path_basename(file.filename == null ? "video" : str(file.filename)), 120)
         string vext = file_ext(fname)
         if convert.kind(vext) != "video":
@@ -366,7 +522,7 @@ group("/api"):
         if minfo == null or minfo["width"] == null:
             os.remove_dir(dir, true)
             abort(400, "La máscara no es una imagen.")
-        string opts = json.stringify({ "mode": mode, "t": t })
+        string opts = json.stringify({ "mode": mode, "tms": tms })
         string out_path = os.path_join(dir, "out.mp4")
         string remote_id = ""
         if target == "server":

@@ -35,6 +35,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <charconv>
 #include <cmath>
 #include <cstdio>
 #include <cerrno>
@@ -396,9 +397,16 @@ bool read_ppm_fd(int fd, Pnm& out) {
     return read_n(fd, out.px.data(), out.px.size()) == 1;
 }
 
+// strtod follows the process locale (GTK sets it: "69,3" in Spanish), ffprobe always prints a dot.
+double parse_num(const std::string& s) {
+    double v = 0;
+    std::from_chars(s.data(), s.data() + s.size(), v);
+    return v;
+}
+
 double parse_rate(const std::string& s) {
     auto slash = s.find('/');
-    double n = std::atof(s.c_str()), d = slash == std::string::npos ? 1.0 : std::atof(s.c_str() + slash + 1);
+    double n = parse_num(s.substr(0, slash)), d = slash == std::string::npos ? 1.0 : parse_num(s.substr(slash + 1));
     return d > 0 ? n / d : 0;
 }
 
@@ -616,7 +624,7 @@ Value fn_video(NativeCtx&, std::vector<Value>& a, std::string& error) {
             auto eq = line.find('=');
             if (eq == std::string::npos) continue;
             std::string k = line.substr(0, eq), v = line.substr(eq + 1);
-            if (k == "avg_frame_rate") avg = v; else if (k == "r_frame_rate") rr = v; else if (k == "duration") dur = std::atof(v.c_str());
+            if (k == "avg_frame_rate") avg = v; else if (k == "r_frame_rate") rr = v; else if (k == "duration") dur = parse_num(v);
         }
         fps_s = parse_rate(avg) > 0 ? avg : rr;
         fps = parse_rate(fps_s);

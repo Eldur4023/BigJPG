@@ -27,6 +27,8 @@ fn List<string> pdf_pages(string dir):
 
 # Trabajos cuyo resultado no es una imagen que medir ni ampliar.
 fn bool is_file_job(Json job):
+    if job["kind"] == "chain":
+        return not is_image_ext(file_ext(job["out_path"]))
     return job["kind"] == "convert" or job["kind"] == "pdf" or (job["kind"] == "inpaint" and job["fmt"] == "mp4")
 
 # Ejecuta una conversión (o la unión de imágenes en un PDF, que va por ImageMagick). Devuelve {"ok", "error"}. Sin porcentaje real (ffmpeg y pandoc no lo dan de forma
@@ -39,7 +41,9 @@ fn Json run_convert(Json job):
             return { "ok": false, "error": "Para crear PDF hace falta ImageMagick" }
         # 150 ppp: una foto de 4000 px no sale en una página de 1,4 m.
         List<string> pdf_args = ["-auto-orient", "-units", "PixelsPerInch", "-density", "150"]
-        for string pg in pdf_pages(os.path_dirname(job["in_path"])):
+        # (una cadena pasa la imagen de entrada en `pdf_from`; el trabajo «pdf» suelto, las páginas de su carpeta)
+        List<string> pages = job["pdf_from"] != null ? [str(job["pdf_from"])] : pdf_pages(os.path_dirname(job["in_path"]))
+        for string pg in pages:
             pdf_args.add(pg)
         pdf_args.add(job["out_path"])
         cmd = { "ok": true, "bin": mg, "args": pdf_args }

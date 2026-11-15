@@ -53,10 +53,26 @@ fn Json remote_upload(Json job):
     # El nombre que viaja en el multipart: sin comillas, punto y coma ni nada raro.
     string safe = regex.replace("[^A-Za-z0-9._ -]", job["name"], "_")
     # Un vídeo pesa: se le da más tiempo que a una imagen.
-    bool video = job["kind"] == "inpaint" and job["fmt"] == "mp4"
+    bool video = (job["kind"] == "inpaint" and job["fmt"] == "mp4") or job["kind"] == "chain"
     List<string> args = ["-s", "-m", video ? "900" : "110", "-w", "\n%{http_code}", "-H", "X-Requested-With: bigjpg"]
     string api_path = ""
-    if job["kind"] == "pdf":
+    if job["kind"] == "chain":
+        # Un archivo + los pasos (--form-string: el JSON lleva comillas) + la máscara si hay quitar marca.
+        string mask = os.path_join(os.path_dirname(job["in_path"]), "mask.png")
+        List<Json> wanted = json.parse(job["opts"])["steps"]
+        bool marks = false
+        for Json w in wanted:
+            if w["op"] == "inpaint":
+                marks = true
+        args.add("-F")
+        args.add("file=@" + job["in_path"] + ";filename=" + safe)
+        args.add("--form-string")
+        args.add("steps=" + json.stringify(wanted))
+        if marks and os.is_file(mask):
+            args.add("-F")
+            args.add("masks=@" + mask + ";filename=mask.png")
+        api_path = "/api/chain"
+    else if job["kind"] == "pdf":
         for string pg in pdf_pages(os.path_dirname(job["in_path"])):
             args.add("-F")
             args.add("files=@" + pg + ";filename=" + regex.replace("[^A-Za-z0-9._ -]", os.path_basename(pg), "_"))
@@ -69,7 +85,7 @@ fn Json remote_upload(Json job):
             args.add("mask=@" + os.path_join(os.path_dirname(job["in_path"]), "mask.png") + ";filename=mask.png")
             if job["fmt"] == "mp4":
                 Json o = json.parse(job["opts"])
-                api_path = "/api/inpaint/video?mode=" + str(o["mode"]) + "&t=" + str(o["t"])
+                api_path = "/api/inpaint/video?mode=" + str(o["mode"]) + "&tms=" + str(o["tms"])
             else:
                 api_path = "/api/inpaint?fmt=" + job["fmt"]
         else if job["kind"] == "convert":
@@ -106,4 +122,53 @@ fn bool remote_delete(string remote_id):
         await http.delete(url + "/api/jobs/" + remote_id, csrf(), { "timeout_ms": 4000 })
     catch e:
         return false
+    return true
+
+# Un trozo de cadena (pasos seguidos que van al servidor): se sube `cur`, se espera su trabajo allí (reflejando el
+# progreso y la cancelación) y se trae el resultado a `out`.
+fn Json run_remote_segment(Json job, string cur, List<Json> seg, string out, int at, int n):
+    string url = await server_url()
+    # El servidor decide por la extensión del nombre: el archivo de ahora no es el que se soltó.
+    string name = regex.replace("\\.[^.]*$", job["name"], "") + "." + file_ext(cur)
+    Json up = null
+    try:
+        up = await remote_upload({ "id": job["id"], "name": name, "kind": "chain", "fmt": "", "in_path": cur, "out_path": out, "opts": json.stringify({ "steps": seg }) })
+    catch e:
+        up = { "ok": false, "remote_id": "", "error": "no se pudo subir al servidor: " + e.message }
+    if not up["ok"]:
+        return { "ok": false, "error": str(up["error"]), "device": "" }
+    string rid = up["remote_id"]
+    int fails = 0
+    long deadline = time.now() + 6 * 3600 * 1000
+    while time.now() < deadline:
+        Json mine = first(await sqlite.query("select status from jobs where id = ?", job["id"]))
+        if mine == null or mine["status"] != "running":
+            await remote_delete(rid)
+            return { "ok": false, "error": "cancelado", "device": "" }
+        Json r = null
+        try:
+            r = await http.get(url + "/api/jobs/" + rid, {}, { "timeout_ms": 5000 })
+        catch e:
+            r = null
+        if r == null or r["status"] != 200:
+            fails = fails + 1
+            if fails > 40:
+                return { "ok": false, "error": "se perdió la conexión con el servidor", "device": "" }
+        else:
+            fails = 0
+            string st = str(r["body"]["status"])
+            if st == "done":
+                if not await remote_download(rid, out):
+                    return { "ok": false, "error": "no se pudo traer el resultado del servidor", "device": "" }
+                await remote_delete(rid)
+                return { "ok": true, "error": "", "device": "" }
+            if st == "error" or st == "canceled":
+                return { "ok": false, "error": "el servidor: " + str(r["body"]["error"]), "device": "" }
+            float p = r["body"]["progress"]
+            await sqlite.exec("update jobs set progress = ? where id = ? and status = 'running'", (at + p / 100.0 * len(seg)) / n * 100.0, job["id"])
+        await sleep(1000)
+    return { "ok": false, "error": "el servidor tardó demasiado", "device": "" }
+
+# El escritorio sí reparte los pasos con `on: "server"` (ver run_chain en lib/chain.lux).
+fn bool delegates():
     return true

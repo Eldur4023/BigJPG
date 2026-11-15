@@ -83,7 +83,7 @@ fn Json run_engine(Json job):
         float pct = last_percent(log_text)
         if pct >= 0.0 and pct != shown:
             shown = pct
-            await sqlite.exec("update jobs set progress = ? where id = ? and status = 'running'", pct, job["id"])
+            await sqlite.exec("update jobs set progress = ? where id = ? and status = 'running'", scaled_pct(job, pct), job["id"])
         Json cur = first(await sqlite.query("select status from jobs where id = ?", job["id"]))
         if cur == null or cur["status"] != "running":
             break

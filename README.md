@@ -19,7 +19,8 @@ Parte de una suite de apps personales autoalojadas (junto a Drive, Mail y Calend
 
 ## Qué hace
 
-- Arrastra, pega (`Ctrl+V`) o elige imágenes; varias a la vez; se amplían de una en una en una cola.
+- **Un solo hueco**: arrastras, pegas (`Ctrl+V`) o eliges archivos de cualquier clase (imagen, vídeo, audio, documento), varios a la vez. Cada uno sale en una tarjeta con su propia **cadena de operaciones**: `+ Añadir` ofrece **Ampliar**, **Quitar marca** y **Convertir**, y se hacen **una detrás de otra** en el orden en que las pongas (por ejemplo: quitar marca → ampliar ×2 → WebP). Sólo se ofrece lo que tiene sentido en cada punto: un MP3 no pasa a PNG, un PDF no se amplía, y tras convertir a otro formato el menú se ajusta al nuevo. **Para todos** añade una operación a todos los archivos donde valga. Con varias imágenes, **Unir en un PDF** hace un solo documento (una página por imagen, reordenables); si no, cada una sale en su PDF.
+- Las cadenas se ejecutan en una sola tarea de la cola (`POST /api/chain`), con los intermedios en PNG sin pérdida; el progreso es el de toda la cadena («paso 2 de 3»). Máximo 6 pasos y una marca por archivo.
 - Tres modelos: **Anime e ilustración** (el de siempre; ×4), **Fotografía** (×4) y **Anime rápido** (×2, ×3 o ×4). Salida en PNG, JPG o WebP.
 - Progreso real de cada trabajo, cancelar, y **comparador antes/después** con deslizador.
 - Los trabajos terminados se conservan unas horas (6 en el servidor, 72 en el escritorio) y se limpian solos.
@@ -27,7 +28,7 @@ Parte de una suite de apps personales autoalojadas (junto a Drive, Mail y Calend
 
 - **Quitar marca**: pintas con un pincel sobre la marca de agua o el objeto y **LaMa** lo rellena. Sin Python: el módulo nativo de Lux [`inpaint`](vendor/lux/src/lux_script/modules/inpaint.cpp) ejecuta el modelo con ONNX Runtime (CPU; carga `libonnxruntime.so` con `dlopen`). Sólo se cambian los píxeles marcados; el resto de la imagen queda intacto. Unos segundos por zona; no se puede cancelar a media inferencia.
 - **Quitar marca en vídeo**: eliges un fotograma donde se vea la marca, la pintas, y se la **sigue en todo el vídeo** aunque se mueva (correlación de niveles de gris sobre lo que cambia respecto a la mediana temporal, a escala reducida y afinada a tamaño completo; si la pierde unos fotogramas mantiene la posición prevista, y si se pierde del todo la busca en todo el cuadro). Dos modos: **Rápida** (relleno clásico sin IA, casi en tiempo real) y **Lenta** (LaMa en cada fotograma: mucho mejor, pero ~1–2 s por fotograma en CPU). Conserva el audio y sale en MP4. Límites: una sola marca (o varias muy juntas) por pasada, y un fondo muy contrastado y quieto bajo una marca muy translúcida puede despistar al seguimiento. Módulo `inpaint.video` de Lux; usa ffmpeg.
-- **Imágenes a PDF**: en **Convertir**, con una o varias imágenes, elige **PDF**: un solo documento, una página por imagen en el orden de la lista (ImageMagick, 150 ppp).
+- **Imágenes a PDF**: **Convertir a PDF** en una imagen, o **Unir en un PDF** con varias (ImageMagick, 150 ppp).
 
 ## Instalar
 
@@ -66,9 +67,10 @@ convert.formats() · convert.kind("mp3") · convert.can("wav", "flac") · conver
 
 ```
 GET  /api/convert/targets?ext=wav   a qué formatos puede pasar (el escritorio añade &target=local|server)
+POST /api/chain                     multipart, «file» + «steps» (lista JSON de pasos, ver server/app/lib/chain.lux) + «masks» (la máscara, si hay quitar marca) → kind: "chain" (el escritorio añade ?target=)
 POST /api/pdf                       multipart, campo «files» (1-100 imágenes) → un PDF (kind: "pdf")
 POST /api/inpaint?fmt=png           multipart, «file» + «mask» (PNG del mismo tamaño; blanco = quitar) → kind: "inpaint"
-POST /api/inpaint/video?mode=fast|slow&t=1.5   multipart, «file» (vídeo) + «mask» (PNG del tamaño del vídeo, la marca en el instante t, en segundos) → kind: "inpaint", format: "mp4"
+POST /api/inpaint/video?mode=fast|slow&tms=1500   multipart, «file» (vídeo) + «mask» (PNG del tamaño del vídeo, la marca en el instante tms, en milisegundos) → kind: "inpaint", format: "mp4"
 POST /api/convert?fmt=mp3           multipart, campo «file» → 201 con el trabajo (kind: "convert"; el escritorio añade &target=)
 ```
 

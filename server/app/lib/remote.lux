@@ -1,0 +1,9 @@
+# El servidor no delega nada en otro servidor: este es el sitio al que delega el escritorio (ver desktop/app/lib/remote.lux).
+# Existe para que lib/chain.lux, idéntica en server/ y desktop/, compile en las dos apps.
+
+# El servidor hace todos los pasos él mismo (ignora el `on` que traigan: el escritorio lo manda al repartir).
+fn bool delegates():
+    return false
+
+fn Json run_remote_segment(Json job, string cur, List<Json> seg, string out, int at, int n):
+    return { "ok": false, "error": "Este servidor no puede delegar pasos en otro servidor.", "device": "" }

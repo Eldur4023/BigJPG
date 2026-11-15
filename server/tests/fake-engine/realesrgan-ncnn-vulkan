@@ -25,6 +25,9 @@ if mode == "fail":
 
 with open(opts["-i"], "rb") as fh:
     head = fh.read(32)
+if head[:8] != b"\x89PNG\r\n\x1a\n":                  # sólo entiende PNG: con otra cosa leería un tamaño absurdo y se comería la RAM
+    sys.stderr.write("fake-engine: sólo acepta PNG\n")
+    sys.exit(1)
 w, h = struct.unpack(">II", head[16:24])           # IHDR de un PNG
 s = int(opts.get("-s", "4"))
 steps = 40 if mode == "slow" else 4

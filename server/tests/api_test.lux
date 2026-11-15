@@ -246,3 +246,41 @@ test "quitar marca: sin LaMa instalado responde 503 y /api/info lo dice":
     test.eq(str(r["stdout"]), "503")
     Json v = await os.run("curl", ["-s", "-m", "20", "-o", "/dev/null", "-w", "%{http_code}", "-H", "X-Requested-With: bigjpg", "-F", "file=@" + files() + "/small.png", "-F", "mask=@" + files() + "/small.png", url("/api/inpaint/video")], { "timeout_ms": 30000 })
     test.eq(str(v["stdout"]), "503")
+
+fn Json chain_upload(string path, string steps):
+    Json r = await os.run("curl", ["-s", "-m", "20", "-w", "\n%{http_code}", "-H", "X-Requested-With: bigjpg", "-F", "file=@" + path, "--form-string", "steps=" + steps, url("/api/chain")], { "timeout_ms": 30000 })
+    List<string> parts = str(r["stdout"]).split("\n")
+    return { "status": int(parts[len(parts) - 1]), "body": json.parse(parts[0]) }
+
+test "cadena: ampliar y luego convertir, una operación detrás de otra":
+    await set_mode("ok")
+    Json up = await chain_upload(files() + "/small.png", "[{\"op\":\"upscale\",\"model\":\"anime\",\"scale\":4,\"fmt\":\"png\"},{\"op\":\"convert\",\"fmt\":\"jpg\"}]")
+    test.eq(up["status"], 201, str(up["body"]))
+    test.eq(up["body"]["kind"], "chain")
+    test.eq(up["body"]["format"], "jpg")
+    test.eq(len(up["body"]["steps"]), 2)
+    Json done = await wait_done(up["body"]["id"])
+    test.eq(done["status"], "done", str(done))
+    test.eq(done["progress"], 100)
+    test.eq(done["step"], 1)
+    test.eq(done["out"]["w"], 32)
+    Json res = await http.get(url("/api/jobs/" + up["body"]["id"] + "/result"))
+    test.contains(str(res["headers"]["content-disposition"]), "small_x4.jpg")
+    # los intermedios se borran: sólo quedan la entrada y el resultado
+    test.ok(not os.is_file(os.path_join(os.getenv("BIGJPG_DATA_DIR", "."), "jobs", up["body"]["id"], "s0.png")))
+
+test "cadena: sólo pasos que tengan sentido para el archivo":
+    # un PNG no pasa a MP3, un PDF no se amplía, el paso 2 ve lo que dejó el 1, y una máscara sobrante o ausente es un 400
+    test.eq((await chain_upload(files() + "/small.png", "[{\"op\":\"convert\",\"fmt\":\"mp3\"}]"))["status"], 400)
+    test.eq((await chain_upload(files() + "/small.png", "[{\"op\":\"convert\",\"fmt\":\"pdf\"},{\"op\":\"upscale\",\"model\":\"anime\",\"scale\":2,\"fmt\":\"png\"}]"))["status"], 400)
+    test.eq((await chain_upload(files() + "/small.png", "[]"))["status"], 400)
+    test.eq((await chain_upload(files() + "/small.png", "[{\"op\":\"baila\"}]"))["status"], 400)
+    test.eq((await chain_upload(files() + "/small.png", "[{\"op\":\"inpaint\",\"fmt\":\"png\"}]"))["status"], 400)
+    test.eq((await chain_upload(files() + "/notimage.txt", "[{\"op\":\"convert\",\"fmt\":\"png\"}]"))["status"], 400)
+    # PNG -> PDF por sí solo sí
+    Json pdf = await chain_upload(files() + "/small.png", "[{\"op\":\"convert\",\"fmt\":\"pdf\"}]")
+    test.eq(pdf["status"], 201, str(pdf["body"]))
+    test.eq((await wait_done(pdf["body"]["id"]))["status"], "done")
+    # sin cabecera X-Requested-With, nada
+    Json nocsrf = await os.run("curl", ["-s", "-o", "/dev/null", "-w", "%{http_code}", "-F", "file=@" + files() + "/small.png", "--form-string", "steps=[]", url("/api/chain")], { "timeout_ms": 30000 })
+    test.eq(str(nocsrf["stdout"]), "403")
